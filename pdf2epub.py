@@ -264,10 +264,10 @@ def detect_crop_box_from_ppm(
         left_dense = dense_boundary_start(column_run_coverage, dense_column_threshold, window_size=8, required_hits=3)
         right_dense = dense_boundary_end(column_run_coverage, dense_column_threshold, window_size=8, required_hits=3)
 
-        top = backtrack_start(row_max_run_lengths, top_dense, sparse_row_threshold, gap_limit=8) if top_dense is not None else None
-        bottom = backtrack_end(row_max_run_lengths, bottom_dense, sparse_row_threshold, gap_limit=8) if bottom_dense is not None else None
-        left = backtrack_start(column_counts, left_dense, sparse_column_threshold, gap_limit=12) if left_dense is not None else None
-        right = backtrack_end(column_counts, right_dense, sparse_column_threshold, gap_limit=12) if right_dense is not None else None
+        top = backtrack_start(row_counts, top_dense, 1, gap_limit=8) if top_dense is not None else None
+        bottom = backtrack_end(row_counts, bottom_dense, 1, gap_limit=8) if bottom_dense is not None else None
+        left = backtrack_start(column_run_coverage, left_dense, sparse_column_threshold, gap_limit=12) if left_dense is not None else None
+        right = backtrack_end(column_run_coverage, right_dense, sparse_column_threshold, gap_limit=12) if right_dense is not None else None
 
         if top is None or bottom is None or left is None or right is None:
             max_row_count = max(row_counts) if row_counts else 0
