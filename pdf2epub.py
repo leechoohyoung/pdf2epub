@@ -424,6 +424,106 @@ def crop_box_from_pdf_bbox(
     )
 
 
+def extract_page_text_bboxes(
+    pdf_path: Path,
+    page_count: int,
+    work_dir: Path,
+    logger: logging.Logger | None = None,
+) -> list[tuple[float, float, float, float, float, float] | None]:
+    """Run pdftohtml -xml and return per-page (left, top, right, bottom, page_w, page_h) in points.
+    Coordinates are top-down (y=0 at top of page). Returns None per page if no text found."""
+    if shutil.which("pdftohtml") is None:
+        if logger is not None:
+            logger.warning("pdftohtml not found; text bbox extraction unavailable.")
+        return [None] * page_count
+
+    output_prefix = work_dir / "layout"
+    try:
+        run_command(["pdftohtml", "-xml", "-i", str(pdf_path), str(output_prefix)])
+    except subprocess.CalledProcessError as error:
+        if logger is not None:
+            logger.warning("pdftohtml layout extraction failed: %s", error)
+        return [None] * page_count
+
+    xml_path = output_prefix.with_suffix(".xml")
+    if not xml_path.exists():
+        if logger is not None:
+            logger.warning("pdftohtml produced no layout XML.")
+        return [None] * page_count
+
+    try:
+        root = ET.parse(xml_path).getroot()
+    except ET.ParseError as error:
+        if logger is not None:
+            logger.warning("Layout XML parse error: %s", error)
+        return [None] * page_count
+
+    bboxes: list[tuple[float, float, float, float, float, float] | None] = [None] * page_count
+
+    for page_elem in root.findall("page"):
+        num_str = page_elem.attrib.get("number", "")
+        if not num_str.isdigit():
+            continue
+        page_num = int(num_str)
+        if page_num < 1 or page_num > page_count:
+            continue
+
+        page_w = float(page_elem.attrib.get("width", 0))
+        page_h = float(page_elem.attrib.get("height", 0))
+
+        min_left = float("inf")
+        min_top = float("inf")
+        max_right = float("-inf")
+        max_bottom = float("-inf")
+
+        for text_elem in page_elem.findall("text"):
+            try:
+                left = float(text_elem.attrib["left"])
+                top = float(text_elem.attrib["top"])
+                w = float(text_elem.attrib["width"])
+                h = float(text_elem.attrib["height"])
+            except (KeyError, ValueError):
+                continue
+            if w <= 0 or h <= 0:
+                continue
+            min_left = min(min_left, left)
+            min_top = min(min_top, top)
+            max_right = max(max_right, left + w)
+            max_bottom = max(max_bottom, top + h)
+
+        if min_left != float("inf"):
+            bboxes[page_num - 1] = (min_left, min_top, max_right, max_bottom, page_w, page_h)
+
+    return bboxes
+
+
+def crop_box_from_text_bbox(
+    text_bbox: tuple[float, float, float, float, float, float],
+    *,
+    dpi: int,
+    padding: int,
+) -> CropBox:
+    """Convert a pdftohtml text bbox (points, top-down) to a pixel CropBox."""
+    left_pt, top_pt, right_pt, bottom_pt, page_w_pt, page_h_pt = text_bbox
+    scale = dpi / 72.0
+
+    full_w = math.ceil(page_w_pt * scale)
+    full_h = math.ceil(page_h_pt * scale)
+
+    left = max(0, math.floor(left_pt * scale) - padding)
+    top = max(0, math.floor(top_pt * scale) - padding)
+    right = min(full_w, math.ceil(right_pt * scale) + padding)
+    bottom = min(full_h, math.ceil(bottom_pt * scale) + padding)
+
+    cropped_w = max(1, right - left)
+    cropped_h = max(1, bottom - top)
+
+    if cropped_w < max(32, int(full_w * 0.10)) or cropped_h < max(32, int(full_h * 0.10)):
+        return CropBox(left=0, top=0, width=full_w, height=full_h)
+
+    return CropBox(left=left, top=top, width=cropped_w, height=cropped_h)
+
+
 def extract_outline(pdf_path: Path, work_dir: Path, logger: logging.Logger | None = None) -> list[TocEntry]:
     if shutil.which("pdftohtml") is None:
         if logger is not None:
@@ -718,6 +818,17 @@ def convert_pdf_to_epub(
             if logger is not None:
                 logger.info("Working directory: %s", temp_dir_path)
 
+            # 1순위: pdftohtml 텍스트 bbox
+            text_bboxes: list[tuple[float, float, float, float, float, float] | None] = [None] * page_count
+            if shutil.which("pdftohtml") is not None:
+                text_bboxes = extract_page_text_bboxes(input_pdf, page_count, temp_dir_path, logger=logger)
+                text_bbox_count = sum(1 for b in text_bboxes if b is not None)
+                if logger is not None:
+                    logger.info("pdftohtml text bbox: %s/%s pages with text detected.", text_bbox_count, page_count)
+            elif logger is not None:
+                logger.warning("pdftohtml not found; skipping text bbox extraction.")
+
+            # 2순위 폴백: Ghostscript bbox
             page_bboxes: list[tuple[float, float, float, float]] | None = None
             if shutil.which("gs") is not None:
                 try:
@@ -725,16 +836,16 @@ def convert_pdf_to_epub(
                     if len(candidate_bboxes) == page_count:
                         page_bboxes = candidate_bboxes
                         if logger is not None:
-                            logger.info("Using Ghostscript bounding boxes for cropping.")
+                            logger.info("Ghostscript bbox extracted for %s pages (fallback).", page_count)
                     elif logger is not None:
                         logger.warning(
-                            "Ghostscript bbox count mismatch: expected %s got %s. Falling back to raster heuristic.",
+                            "Ghostscript bbox count mismatch: expected %s got %s.",
                             page_count,
                             len(candidate_bboxes),
                         )
                 except Exception:
                     if logger is not None:
-                        logger.exception("Ghostscript bbox extraction failed. Falling back to raster heuristic.")
+                        logger.exception("Ghostscript bbox extraction failed.")
 
             outline_entries = extract_outline(input_pdf, temp_dir_path, logger=logger)
             if logger is not None:
@@ -743,26 +854,50 @@ def convert_pdf_to_epub(
             pages: list[PageAsset] = []
 
             for page_number in range(1, page_count + 1):
-                if logger is not None:
-                    logger.info("Processing page %s/%s", page_number, page_count)
+                idx = page_number - 1
+                ppm_w = ppm_h = 0
+                method = "unknown"
+                bbox_info = ""
+                crop_box = CropBox(left=0, top=0, width=1, height=1)
+                png_path = image_dir / f"page-{page_number:04d}.png"
 
                 try:
                     ppm_path = render_page_to_ppm(input_pdf, page_number, dpi, ppm_dir / "page")
-                    if page_bboxes is not None:
+                    ppm_w, ppm_h = read_ppm_size(ppm_path)
+
+                    text_bbox = text_bboxes[idx]
+                    gs_bbox = page_bboxes[idx] if page_bboxes is not None else None
+
+                    if text_bbox is not None:
+                        method = "pdftohtml"
+                        crop_box = crop_box_from_text_bbox(text_bbox, dpi=dpi, padding=padding)
+                        bbox_info = (
+                            f"text_bbox=({text_bbox[0]:.1f},{text_bbox[1]:.1f})-"
+                            f"({text_bbox[2]:.1f},{text_bbox[3]:.1f})pt "
+                            f"page={text_bbox[4]:.1f}x{text_bbox[5]:.1f}pt"
+                        )
+                    elif gs_bbox is not None:
+                        method = "ghostscript"
                         crop_box = crop_box_from_pdf_bbox(
-                            page_bboxes[page_number - 1],
+                            gs_bbox,
                             page_width_points=page_width_points,
                             page_height_points=page_height_points,
                             dpi=dpi,
                             padding=padding,
                         )
+                        bbox_info = (
+                            f"gs_bbox=({gs_bbox[0]:.1f},{gs_bbox[1]:.1f})-"
+                            f"({gs_bbox[2]:.1f},{gs_bbox[3]:.1f})pt"
+                        )
                     else:
+                        method = "ppm-raster"
                         crop_box = detect_crop_box_from_ppm(
                             ppm_path,
                             white_threshold=white_threshold,
                             padding=padding,
                         )
-                    png_path = image_dir / f"page-{page_number:04d}.png"
+                        bbox_info = "pixel analysis"
+
                     width, height = crop_ppm_to_png(ppm_path, png_path, crop_box)
                 except Exception:
                     if logger is not None:
@@ -781,15 +916,12 @@ def convert_pdf_to_epub(
 
                 if logger is not None:
                     logger.info(
-                        "Processed page %s/%s -> %sx%s crop=(left=%s top=%s width=%s height=%s)",
-                        page_number,
-                        page_count,
-                        width,
-                        height,
-                        crop_box.left,
-                        crop_box.top,
-                        crop_box.width,
-                        crop_box.height,
+                        "Page %s/%s | rendered=%sx%s | method=%s | %s | crop=left:%s top:%s w:%s h:%s | output=%sx%s",
+                        page_number, page_count,
+                        ppm_w, ppm_h,
+                        method, bbox_info,
+                        crop_box.left, crop_box.top, crop_box.width, crop_box.height,
+                        width, height,
                     )
 
             filtered_toc = [entry for entry in outline_entries if 1 <= entry.page_index <= page_count]
