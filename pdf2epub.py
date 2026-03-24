@@ -20,7 +20,6 @@ from pathlib import Path
 REQUIRED_COMMANDS = ("pdfinfo",)
 
 
-
 @dataclass(frozen=True)
 class PageAsset:
     index: int
@@ -69,7 +68,6 @@ def run_command(args: list[str], *, cwd: Path | None = None, check: bool = True)
         text=True,
         capture_output=True,
     )
-
 
 
 def get_content_bbox(page: fitz.Page) -> fitz.Rect:
