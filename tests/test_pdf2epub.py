@@ -42,6 +42,40 @@ class Pdf2EpubTests(unittest.TestCase):
 
             self.assertIn("hello log", log_path.read_text(encoding="utf-8"))
 
+    def test_write_fixed_layout_epub(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            image_path = temp_path / "page-0001.png"
+            image_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            output_path = temp_path / "book.epub"
+
+            module.write_fixed_layout_epub(
+                output_path=output_path,
+                title="Sample Book",
+                author="Tester",
+                language="ko",
+                pages=[
+                    module.PageAsset(
+                        index=1,
+                        image_path=image_path,
+                        width=600,
+                        height=800,
+                        spine_title="Page 1",
+                    )
+                ],
+            )
+
+            self.assertTrue(output_path.exists())
+            with zipfile.ZipFile(output_path) as epub:
+                self.assertEqual(epub.read("mimetype"), b"application/epub+zip")
+                names = set(epub.namelist())
+                self.assertIn("META-INF/container.xml", names)
+                self.assertIn("OEBPS/content.opf", names)
+                self.assertIn("OEBPS/nav.xhtml", names)
+                self.assertIn("OEBPS/pages/page-0001.xhtml", names)
+                self.assertIn("OEBPS/images/page-0001.png", names)
+
 
 if __name__ == "__main__":
     unittest.main()
