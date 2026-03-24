@@ -82,11 +82,11 @@ class Pdf2EpubTests(unittest.TestCase):
     def test_get_content_bbox_returns_text_area(self):
         module = load_module()
         # 인메모리 PDF 생성: 200x300pt 페이지에 텍스트 블록 삽입
-        doc = fitz.open()
-        page = doc.new_page(width=200, height=300)
-        page.insert_text((50, 100), "Hello", fontsize=12)
+        with fitz.open() as doc:
+            page = doc.new_page(width=200, height=300)
+            page.insert_text((50, 100), "Hello", fontsize=12)
 
-        bbox = module.get_content_bbox(page)
+            bbox = module.get_content_bbox(page)
 
         # 텍스트가 있는 영역 안에 결과가 있어야 함
         self.assertGreaterEqual(bbox.x0, 0)
@@ -98,12 +98,12 @@ class Pdf2EpubTests(unittest.TestCase):
 
     def test_get_content_bbox_empty_page_returns_full_rect(self):
         module = load_module()
-        doc = fitz.open()
-        page = doc.new_page(width=200, height=300)
+        with fitz.open() as doc:
+            page = doc.new_page(width=200, height=300)
 
-        bbox = module.get_content_bbox(page)
+            bbox = module.get_content_bbox(page)
 
-        self.assertEqual(bbox, page.rect)
+            self.assertEqual(bbox, page.rect)
 
 
 if __name__ == "__main__":
