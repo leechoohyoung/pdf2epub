@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-REQUIRED_COMMANDS = ("mutool", "pdfinfo")
+REQUIRED_COMMANDS = ("pdfinfo",)
 
 
 
@@ -71,13 +71,6 @@ def run_command(args: list[str], *, cwd: Path | None = None, check: bool = True)
     )
 
 
-def read_png_size(png_path: Path) -> tuple[int, int]:
-    with png_path.open("rb") as f:
-        f.seek(16)  # PNG signature(8) + IHDR length(4) + IHDR type(4)
-        width = int.from_bytes(f.read(4), "big")
-        height = int.from_bytes(f.read(4), "big")
-    return width, height
-
 
 def get_content_bbox(page: fitz.Page) -> fitz.Rect:
     rects = []
@@ -94,14 +87,13 @@ def get_content_bbox(page: fitz.Page) -> fitz.Rect:
 
 
 def render_page_to_png(pdf_path: Path, page_number: int, dpi: int, output_path: Path) -> tuple[int, int]:
-    run_command([
-        "mutool", "draw",
-        "-r", str(dpi),
-        "-o", str(output_path),
-        str(pdf_path),
-        str(page_number),
-    ])
-    return read_png_size(output_path)
+    with fitz.open(str(pdf_path)) as doc:
+        page = doc[page_number - 1]
+        clip = get_content_bbox(page)
+        mat = fitz.Matrix(dpi / 72, dpi / 72)
+        pixmap = page.get_pixmap(matrix=mat, clip=clip)
+        pixmap.save(str(output_path))
+        return pixmap.width, pixmap.height
 
 
 def parse_pdf_page_count(pdf_path: Path) -> int:

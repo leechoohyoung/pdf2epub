@@ -105,6 +105,11 @@ class Pdf2EpubTests(unittest.TestCase):
 
             self.assertEqual(bbox, page.rect)
 
+    def test_required_commands_does_not_include_mutool(self):
+        module = load_module()
+        self.assertNotIn("mutool", module.REQUIRED_COMMANDS)
+        self.assertIn("pdfinfo", module.REQUIRED_COMMANDS)
+
 
 if __name__ == "__main__":
     unittest.main()
