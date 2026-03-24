@@ -290,12 +290,13 @@ def build_opf_document(identifier: str, title: str, author: str, language: str, 
     for page in pages:
         page_id = f"page-{page.index:04d}"
         image_id = f"image-{page.index:04d}"
-        media_type = "image/png"
+        is_cover = page.index == pages[0].index
+        cover_image_prop = ' properties="cover-image"' if is_cover else ""
         manifest_items.append(
             f'<item id="{page_id}" href="pages/{page_id}.xhtml" media-type="application/xhtml+xml"/>'
         )
         manifest_items.append(
-            f'<item id="{image_id}" href="images/{page.image_path.name}" media-type="{media_type}"/>'
+            f'<item id="{image_id}" href="images/{page.image_path.name}" media-type="image/png"{cover_image_prop}/>'
         )
         spine_items.append(f'<itemref idref="{page_id}"/>')
 
@@ -309,6 +310,7 @@ def build_opf_document(identifier: str, title: str, author: str, language: str, 
     <dc:language>{html.escape(language)}</dc:language>
     <dc:creator>{metadata_author}</dc:creator>
     <meta property="dcterms:modified">2026-03-23T00:00:00Z</meta>
+    <meta name="cover" content="image-{pages[0].index:04d}"/>
     <meta property="rendition:layout">pre-paginated</meta>
     <meta property="rendition:orientation">auto</meta>
     <meta property="rendition:spread">none</meta>
