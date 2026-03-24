@@ -113,6 +113,22 @@ def parse_pdf_metadata(pdf_path: Path) -> tuple[str, str]:
 
 
 
+def build_nav_document(title: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="ko">
+<head>
+  <title>{html.escape(title)}</title>
+</head>
+<body>
+  <nav epub:type="toc" id="toc">
+    <ol/>
+  </nav>
+</body>
+</html>
+"""
+
+
 def build_page_xhtml(page: PageAsset) -> str:
     image_name = page.image_path.name
     viewport = f"width={page.width},height={page.height}"
@@ -135,6 +151,7 @@ def build_page_xhtml(page: PageAsset) -> str:
 
 def build_opf_document(identifier: str, title: str, author: str, language: str, pages: list[PageAsset]) -> str:
     manifest_items = [
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
         '<item id="css" href="styles/fixed.css" media-type="text/css"/>',
     ]
     spine_items: list[str] = []
@@ -195,6 +212,7 @@ img { display: block; width: 100%; height: 100%; }
 """
 
     opf = build_opf_document(identifier, title, author, language, pages)
+    nav_xhtml = build_nav_document(title)
 
     with zipfile.ZipFile(output_path, "w") as epub:
         epub.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
@@ -209,6 +227,7 @@ img { display: block; width: 100%; height: 100%; }
 """,
         )
         epub.writestr("OEBPS/styles/fixed.css", fixed_css)
+        epub.writestr("OEBPS/nav.xhtml", nav_xhtml)
         epub.writestr("OEBPS/content.opf", opf)
 
         for page in pages:
