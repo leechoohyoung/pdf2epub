@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fitz
 import html
 import logging
 import re
@@ -76,6 +77,20 @@ def read_png_size(png_path: Path) -> tuple[int, int]:
         width = int.from_bytes(f.read(4), "big")
         height = int.from_bytes(f.read(4), "big")
     return width, height
+
+
+def get_content_bbox(page: fitz.Page) -> fitz.Rect:
+    rects = []
+    for block in page.get_text("dict")["blocks"]:
+        rects.append(fitz.Rect(block["bbox"]))
+    for drawing in page.get_drawings():
+        rects.append(drawing["rect"])
+    if not rects:
+        return page.rect
+    bbox = rects[0]
+    for r in rects[1:]:
+        bbox |= r
+    return bbox & page.rect
 
 
 def render_page_to_png(pdf_path: Path, page_number: int, dpi: int, output_path: Path) -> tuple[int, int]:
