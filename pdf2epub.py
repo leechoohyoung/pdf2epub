@@ -272,7 +272,7 @@ def build_page_xhtml(page: PageAsset) -> str:
 </head>
 <body>
   <div class="page" style="width:{page.width}px;height:{page.height}px;">
-    <img src="../images/{html.escape(image_name)}" alt="{html.escape(page.spine_title)}" width="{page.width}" height="{page.height}"/>
+    <img src="../images/{html.escape(image_name)}" alt="{html.escape(page.spine_title)}"/>
   </div>
 </body>
 </html>
