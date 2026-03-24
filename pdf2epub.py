@@ -11,7 +11,6 @@ import subprocess
 import tempfile
 import traceback
 import uuid
-import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,11 +18,6 @@ from pathlib import Path
 
 REQUIRED_COMMANDS = ("mutool", "pdfinfo")
 
-
-@dataclass(frozen=True)
-class TocEntry:
-    label: str
-    page_index: int
 
 
 @dataclass(frozen=True)
@@ -118,146 +112,6 @@ def parse_pdf_metadata(pdf_path: Path) -> tuple[str, str]:
     return title, author
 
 
-def extract_outline(pdf_path: Path, work_dir: Path, logger: logging.Logger | None = None) -> list[TocEntry]:
-    if shutil.which("pdftohtml") is None:
-        if logger is not None:
-            logger.warning("Skipping outline extraction because pdftohtml is unavailable.")
-        return []
-
-    output_prefix = work_dir / "outline"
-    try:
-        run_command(
-            [
-                "pdftohtml",
-                "-xml",
-                "-i",
-                "-f",
-                "1",
-                "-l",
-                "1",
-                str(pdf_path),
-                str(output_prefix),
-            ]
-        )
-    except subprocess.CalledProcessError as error:
-        if logger is not None:
-            logger.warning("Outline extraction failed: %s", error)
-        return []
-
-    xml_path = output_prefix.with_suffix(".xml")
-    if not xml_path.exists():
-        if logger is not None:
-            logger.warning("Outline extraction produced no XML file.")
-        return []
-
-    try:
-        root = ET.parse(xml_path).getroot()
-    except ET.ParseError as error:
-        if logger is not None:
-            logger.warning("Outline XML parsing failed: %s", error)
-        return []
-
-    outline = root.find("outline")
-    if outline is None:
-        return []
-
-    entries: list[TocEntry] = []
-
-    def walk(node: ET.Element) -> None:
-        for child in node:
-            if child.tag != "item":
-                if child.tag == "outline":
-                    walk(child)
-                continue
-
-            label = (child.text or "").strip()
-            page_text = child.attrib.get("page", "").strip()
-            if label and page_text.isdigit():
-                entries.append(TocEntry(label=label, page_index=int(page_text)))
-
-            nested_outline = child.find("outline")
-            if nested_outline is not None:
-                walk(nested_outline)
-
-    walk(outline)
-    return entries
-
-
-def render_page_to_ppm(pdf_path: Path, page_number: int, dpi: int, output_prefix: Path) -> Path:
-    run_command(
-        [
-            "pdftoppm",
-            "-f",
-            str(page_number),
-            "-l",
-            str(page_number),
-            "-r",
-            str(dpi),
-            str(pdf_path),
-            str(output_prefix),
-        ]
-    )
-    return find_rendered_page_path(output_prefix, page_number)
-
-
-def build_nav_document(title: str, toc_entries: list[TocEntry], page_count: int) -> str:
-    nav_items: list[str] = []
-    if toc_entries:
-        for entry in toc_entries:
-            safe_label = html.escape(entry.label)
-            nav_items.append(f'<li><a href="pages/page-{entry.page_index:04d}.xhtml">{safe_label}</a></li>')
-    else:
-        for page_index in range(1, page_count + 1):
-            nav_items.append(f'<li><a href="pages/page-{page_index:04d}.xhtml">Page {page_index}</a></li>')
-
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="ko">
-<head>
-  <title>{html.escape(title)}</title>
-</head>
-<body>
-  <nav epub:type="toc" id="toc">
-    <h1>{html.escape(title)}</h1>
-    <ol>
-      {''.join(nav_items)}
-    </ol>
-  </nav>
-</body>
-</html>
-"""
-
-
-def build_ncx_document(identifier: str, title: str, toc_entries: list[TocEntry], page_count: int) -> str:
-    points: list[str] = []
-    if toc_entries:
-        source_entries = toc_entries
-    else:
-        source_entries = [TocEntry(label=f"Page {page_index}", page_index=page_index) for page_index in range(1, page_count + 1)]
-
-    for play_order, entry in enumerate(source_entries, start=1):
-        points.append(
-            f"""
-    <navPoint id="navPoint-{play_order}" playOrder="{play_order}">
-      <navLabel><text>{html.escape(entry.label)}</text></navLabel>
-      <content src="pages/page-{entry.page_index:04d}.xhtml"/>
-    </navPoint>"""
-        )
-
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
-  <head>
-    <meta name="dtb:uid" content="{identifier}"/>
-    <meta name="dtb:depth" content="1"/>
-    <meta name="dtb:totalPageCount" content="0"/>
-    <meta name="dtb:maxPageNumber" content="0"/>
-  </head>
-  <docTitle><text>{html.escape(title)}</text></docTitle>
-  <navMap>{''.join(points)}
-  </navMap>
-</ncx>
-"""
-
 
 def build_page_xhtml(page: PageAsset) -> str:
     image_name = page.image_path.name
@@ -281,11 +135,9 @@ def build_page_xhtml(page: PageAsset) -> str:
 
 def build_opf_document(identifier: str, title: str, author: str, language: str, pages: list[PageAsset]) -> str:
     manifest_items = [
-        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
-        '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
         '<item id="css" href="styles/fixed.css" media-type="text/css"/>',
     ]
-    spine_items = ['<itemref idref="nav" linear="no"/>']
+    spine_items: list[str] = []
 
     for page in pages:
         page_id = f"page-{page.index:04d}"
@@ -318,7 +170,7 @@ def build_opf_document(identifier: str, title: str, author: str, language: str, 
   <manifest>
     {''.join(manifest_items)}
   </manifest>
-  <spine toc="ncx">
+  <spine>
     {''.join(spine_items)}
   </spine>
 </package>
@@ -332,7 +184,6 @@ def write_fixed_layout_epub(
     author: str,
     language: str,
     pages: list[PageAsset],
-    toc_entries: list[TocEntry],
 ) -> None:
     identifier = f"urn:uuid:{uuid.uuid4()}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -343,8 +194,6 @@ body { background: #fff; }
 img { display: block; width: 100%; height: 100%; }
 """
 
-    nav_xhtml = build_nav_document(title, toc_entries, len(pages))
-    ncx = build_ncx_document(identifier, title, toc_entries, len(pages))
     opf = build_opf_document(identifier, title, author, language, pages)
 
     with zipfile.ZipFile(output_path, "w") as epub:
@@ -360,8 +209,6 @@ img { display: block; width: 100%; height: 100%; }
 """,
         )
         epub.writestr("OEBPS/styles/fixed.css", fixed_css)
-        epub.writestr("OEBPS/nav.xhtml", nav_xhtml)
-        epub.writestr("OEBPS/toc.ncx", ncx)
         epub.writestr("OEBPS/content.opf", opf)
 
         for page in pages:
@@ -408,10 +255,6 @@ def convert_pdf_to_epub(
             if logger is not None:
                 logger.info("Working directory: %s", temp_dir_path)
 
-            outline_entries = extract_outline(input_pdf, temp_dir_path, logger=logger)
-            if logger is not None:
-                logger.info("Outline entries: %s", len(outline_entries))
-
             pages: list[PageAsset] = []
 
             for page_number in range(1, page_count + 1):
@@ -437,9 +280,8 @@ def convert_pdf_to_epub(
                 if logger is not None:
                     logger.info("Page %s/%s | output=%sx%s", page_number, page_count, width, height)
 
-            filtered_toc = [entry for entry in outline_entries if 1 <= entry.page_index <= page_count]
             if logger is not None:
-                logger.info("Writing EPUB package with %s pages and %s TOC entries.", len(pages), len(filtered_toc))
+                logger.info("Writing EPUB package with %s pages.", len(pages))
 
             write_fixed_layout_epub(
                 output_path=output_epub,
@@ -447,7 +289,6 @@ def convert_pdf_to_epub(
                 author=author,
                 language=language,
                 pages=pages,
-                toc_entries=filtered_toc,
             )
 
             if keep_temp and temp_dir_path is not None:
