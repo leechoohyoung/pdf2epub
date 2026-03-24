@@ -285,7 +285,7 @@ def build_opf_document(identifier: str, title: str, author: str, language: str, 
         '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
         '<item id="css" href="styles/fixed.css" media-type="text/css"/>',
     ]
-    spine_items = ['<itemref idref="nav"/>']
+    spine_items = ['<itemref idref="nav" linear="no"/>']
 
     for page in pages:
         page_id = f"page-{page.index:04d}"
