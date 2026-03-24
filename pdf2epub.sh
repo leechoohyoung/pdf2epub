@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $(basename "$0") <input.pdf> [-o output.epub] [--dpi 150] [--padding 16] [--white-threshold 245] [--log-file output.log] [--keep-temp]" >&2
+  echo "Usage: $(basename "$0") <input.pdf> [-o output.epub] [--dpi 150] [--language ko] [--log-file output.log] [--keep-temp]" >&2
   exit 1
 fi
 

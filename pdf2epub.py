@@ -311,7 +311,7 @@ def build_opf_document(identifier: str, title: str, author: str, language: str, 
     <meta property="dcterms:modified">2026-03-23T00:00:00Z</meta>
     <meta property="rendition:layout">pre-paginated</meta>
     <meta property="rendition:orientation">auto</meta>
-    <meta property="rendition:spread">auto</meta>
+    <meta property="rendition:spread">none</meta>
   </metadata>
   <manifest>
     {''.join(manifest_items)}
@@ -337,8 +337,8 @@ def write_fixed_layout_epub(
 
     fixed_css = """html, body { margin: 0; padding: 0; }
 body { background: #fff; }
-.page { position: relative; overflow: hidden; }
-img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.page { position: relative; }
+img { display: block; width: 100%; height: 100%; }
 """
 
     nav_xhtml = build_nav_document(title, toc_entries, len(pages))
