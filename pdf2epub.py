@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import html
 import logging
-import math
 import re
 import shutil
 import subprocess
@@ -18,15 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-REQUIRED_COMMANDS = ("pdftoppm", "pdfinfo", "sips")
-
-
-@dataclass(frozen=True)
-class CropBox:
-    left: int
-    top: int
-    width: int
-    height: int
+REQUIRED_COMMANDS = ("mutool", "pdfinfo")
 
 
 @dataclass(frozen=True)
@@ -85,252 +76,23 @@ def run_command(args: list[str], *, cwd: Path | None = None, check: bool = True)
     )
 
 
-def read_token(handle) -> bytes:
-    token = bytearray()
-    while True:
-        chunk = handle.read(1)
-        if not chunk:
-            return bytes(token)
-        if chunk == b"#":
-            handle.readline()
-            continue
-        if chunk.isspace():
-            if token:
-                return bytes(token)
-            continue
-        token.extend(chunk)
-        break
-    while True:
-        chunk = handle.read(1)
-        if not chunk or chunk.isspace():
-            return bytes(token)
-        token.extend(chunk)
-
-
-def read_ppm_size(ppm_path: Path) -> tuple[int, int]:
-    with ppm_path.open("rb") as handle:
-        magic = read_token(handle)
-        if magic != b"P6":
-            raise ValueError(f"Unsupported PPM format: {magic!r}")
-        width = int(read_token(handle))
-        height = int(read_token(handle))
-        max_value = int(read_token(handle))
-        if max_value != 255:
-            raise ValueError(f"Unsupported PPM max value: {max_value}")
+def read_png_size(png_path: Path) -> tuple[int, int]:
+    with png_path.open("rb") as f:
+        f.seek(16)  # PNG signature(8) + IHDR length(4) + IHDR type(4)
+        width = int.from_bytes(f.read(4), "big")
+        height = int.from_bytes(f.read(4), "big")
     return width, height
 
 
-def find_rendered_page_path(output_prefix: Path, page_number: int) -> Path:
-    candidates = sorted(output_prefix.parent.glob(f"{output_prefix.name}-*.ppm"))
-    preferred = [
-        output_prefix.parent / f"{output_prefix.name}-{page_number}.ppm",
-        output_prefix.parent / f"{output_prefix.name}-{page_number:02d}.ppm",
-        output_prefix.parent / f"{output_prefix.name}-{page_number:03d}.ppm",
-        output_prefix.parent / f"{output_prefix.name}-{page_number:04d}.ppm",
-    ]
-
-    for candidate in preferred:
-        if candidate.exists():
-            return candidate
-
-    if len(candidates) == 1:
-        return candidates[0]
-
-    raise FileNotFoundError(f"Unable to locate rendered page for {output_prefix} page={page_number}")
-
-
-def detect_crop_box_from_ppm(
-    ppm_path: Path,
-    *,
-    white_threshold: int = 245,
-    min_content_pixels: int | None = None,
-    padding: int = 12,
-) -> CropBox:
-    with ppm_path.open("rb") as handle:
-        magic = read_token(handle)
-        if magic != b"P6":
-            raise ValueError(f"Unsupported PPM format: {magic!r}")
-        width = int(read_token(handle))
-        height = int(read_token(handle))
-        max_value = int(read_token(handle))
-        if max_value != 255:
-            raise ValueError(f"Unsupported PPM max value: {max_value}")
-        data = handle.read()
-
-    row_counts = [0] * height
-    column_counts = [0] * width
-    row_max_run_lengths = [0] * height
-    column_run_coverage = [0] * width
-
-    for y in range(height):
-        row_start = y * width * 3
-        count = 0
-        run_start: int | None = None
-        for x in range(width):
-            offset = row_start + (x * 3)
-            red = data[offset]
-            green = data[offset + 1]
-            blue = data[offset + 2]
-            is_dark = red < white_threshold or green < white_threshold or blue < white_threshold
-            if is_dark:
-                count += 1
-                column_counts[x] += 1
-                if run_start is None:
-                    run_start = x
-            elif run_start is not None:
-                run_length = x - run_start
-                if run_length > row_max_run_lengths[y]:
-                    row_max_run_lengths[y] = run_length
-                if run_length >= 6:
-                    for run_x in range(run_start, x):
-                        column_run_coverage[run_x] += 1
-                run_start = None
-        row_counts[y] = count
-
-        if run_start is not None:
-            run_length = width - run_start
-            if run_length > row_max_run_lengths[y]:
-                row_max_run_lengths[y] = run_length
-            if run_length >= 6:
-                for run_x in range(run_start, width):
-                    column_run_coverage[run_x] += 1
-
-    if min_content_pixels is not None:
-        row_threshold = min_content_pixels
-        column_threshold = min_content_pixels
-        top = next((index for index, count in enumerate(row_counts) if count >= row_threshold), None)
-        bottom = next((index for index, count in reversed(list(enumerate(row_counts))) if count >= row_threshold), None)
-        left = next((index for index, count in enumerate(column_counts) if count >= column_threshold), None)
-        right = next((index for index, count in reversed(list(enumerate(column_counts))) if count >= column_threshold), None)
-    else:
-        def dense_boundary_start(features: list[int], threshold: int, window_size: int, required_hits: int) -> int | None:
-            limit = len(features) - window_size + 1
-            if limit < 1:
-                return None
-            for start_index in range(limit):
-                window = features[start_index : start_index + window_size]
-                hits = [offset for offset, value in enumerate(window) if value >= threshold]
-                if len(hits) >= required_hits:
-                    return start_index + hits[0]
-            return None
-
-        def dense_boundary_end(features: list[int], threshold: int, window_size: int, required_hits: int) -> int | None:
-            limit = len(features) - window_size
-            if limit < 0:
-                return None
-            for start_index in range(limit, -1, -1):
-                window = features[start_index : start_index + window_size]
-                hits = [offset for offset, value in enumerate(window) if value >= threshold]
-                if len(hits) >= required_hits:
-                    return start_index + hits[-1]
-            return None
-
-        def backtrack_start(features: list[int], start_index: int, sparse_threshold: int, gap_limit: int) -> int:
-            boundary = start_index
-            gap = 0
-            for index in range(start_index, -1, -1):
-                if features[index] >= sparse_threshold:
-                    boundary = index
-                    gap = 0
-                else:
-                    gap += 1
-                    if gap >= gap_limit:
-                        break
-            return boundary
-
-        def backtrack_end(features: list[int], end_index: int, sparse_threshold: int, gap_limit: int) -> int:
-            boundary = end_index
-            gap = 0
-            for index in range(end_index, len(features)):
-                if features[index] >= sparse_threshold:
-                    boundary = index
-                    gap = 0
-                else:
-                    gap += 1
-                    if gap >= gap_limit:
-                        break
-            return boundary
-
-        max_row_run = max(row_max_run_lengths) if row_max_run_lengths else 0
-        max_column_coverage = max(column_run_coverage) if column_run_coverage else 0
-
-        dense_row_threshold = max(10, int(max_row_run * 0.20))
-        sparse_row_threshold = max(6, dense_row_threshold // 2)
-        dense_column_threshold = max(3, int(max_column_coverage * 0.08))
-        sparse_column_threshold = 1
-
-        top_dense = dense_boundary_start(row_max_run_lengths, dense_row_threshold, window_size=6, required_hits=2)
-        bottom_dense = dense_boundary_end(row_max_run_lengths, dense_row_threshold, window_size=6, required_hits=2)
-        left_dense = dense_boundary_start(column_run_coverage, dense_column_threshold, window_size=8, required_hits=3)
-        right_dense = dense_boundary_end(column_run_coverage, dense_column_threshold, window_size=8, required_hits=3)
-
-        top = backtrack_start(row_counts, top_dense, 1, gap_limit=8) if top_dense is not None else None
-        bottom = backtrack_end(row_counts, bottom_dense, 1, gap_limit=8) if bottom_dense is not None else None
-        left = backtrack_start(column_run_coverage, left_dense, sparse_column_threshold, gap_limit=12) if left_dense is not None else None
-        right = backtrack_end(column_run_coverage, right_dense, sparse_column_threshold, gap_limit=12) if right_dense is not None else None
-
-        if top is None or bottom is None or left is None or right is None:
-            max_row_count = max(row_counts) if row_counts else 0
-            max_column_count = max(column_counts) if column_counts else 0
-            row_threshold = max(24, int(max_row_count * 0.03))
-            column_threshold = max(24, int(max_column_count * 0.03))
-            top = next((index for index, count in enumerate(row_counts) if count >= row_threshold), None)
-            bottom = next((index for index, count in reversed(list(enumerate(row_counts))) if count >= row_threshold), None)
-            left = next((index for index, count in enumerate(column_counts) if count >= column_threshold), None)
-            right = next((index for index, count in reversed(list(enumerate(column_counts))) if count >= column_threshold), None)
-
-    if top is None or bottom is None or left is None or right is None:
-        return CropBox(left=0, top=0, width=width, height=height)
-
-    left = max(0, left - padding)
-    top = max(0, top - padding)
-    right = min(width - 1, right + padding)
-    bottom = min(height - 1, bottom + padding)
-
-    return CropBox(
-        left=left,
-        top=top,
-        width=(right - left + 1),
-        height=(bottom - top + 1),
-    )
-
-
-def crop_ppm_to_png(ppm_path: Path, output_path: Path, crop_box: CropBox) -> tuple[int, int]:
-    args = [
-        "sips",
-        "-s",
-        "format",
-        "png",
-        "-c",
-        str(crop_box.height),
-        str(crop_box.width),
-        "--cropOffset",
-        str(crop_box.top),
-        str(crop_box.left),
-        str(ppm_path),
-        "--out",
-        str(output_path),
-    ]
-    run_command(args)
-    return read_image_size(output_path)
-
-
-def read_image_size(image_path: Path) -> tuple[int, int]:
-    result = run_command(
-        [
-            "sips",
-            "-g",
-            "pixelWidth",
-            "-g",
-            "pixelHeight",
-            str(image_path),
-        ]
-    )
-    width_match = re.search(r"pixelWidth:\s+(\d+)", result.stdout)
-    height_match = re.search(r"pixelHeight:\s+(\d+)", result.stdout)
-    if not width_match or not height_match:
-        raise ValueError(f"Unable to read image size from {image_path}")
-    return int(width_match.group(1)), int(height_match.group(1))
+def render_page_to_png(pdf_path: Path, page_number: int, dpi: int, output_path: Path) -> tuple[int, int]:
+    run_command([
+        "mutool", "draw",
+        "-r", str(dpi),
+        "-o", str(output_path),
+        str(pdf_path),
+        str(page_number),
+    ])
+    return read_png_size(output_path)
 
 
 def parse_pdf_page_count(pdf_path: Path) -> int:
@@ -339,14 +101,6 @@ def parse_pdf_page_count(pdf_path: Path) -> int:
     if not match:
         raise ValueError("Unable to determine page count from pdfinfo output")
     return int(match.group(1))
-
-
-def parse_pdf_page_size_points(pdf_path: Path) -> tuple[float, float]:
-    result = run_command(["pdfinfo", str(pdf_path)])
-    match = re.search(r"^Page size:\s+([0-9.]+)\s+x\s+([0-9.]+)\spts$", result.stdout, flags=re.MULTILINE)
-    if not match:
-        raise ValueError("Unable to determine page size from pdfinfo output")
-    return float(match.group(1)), float(match.group(2))
 
 
 def extract_pdfinfo_value(pdfinfo_text: str, key: str) -> str:
@@ -362,166 +116,6 @@ def parse_pdf_metadata(pdf_path: Path) -> tuple[str, str]:
     title = extract_pdfinfo_value(result.stdout, "Title")
     author = extract_pdfinfo_value(result.stdout, "Author")
     return title, author
-
-
-def parse_ghostscript_bboxes(output_text: str) -> list[tuple[float, float, float, float]]:
-    matches = re.findall(
-        r"^%%HiResBoundingBox:\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)$",
-        output_text,
-        flags=re.MULTILINE,
-    )
-    return [tuple(float(value) for value in match) for match in matches]
-
-
-def extract_page_bboxes(pdf_path: Path) -> list[tuple[float, float, float, float]]:
-    result = run_command(
-        [
-            "gs",
-            "-q",
-            "-dNOPAUSE",
-            "-dBATCH",
-            "-sDEVICE=bbox",
-            str(pdf_path),
-        ]
-    )
-    bbox_output = f"{result.stdout}\n{result.stderr}"
-    return parse_ghostscript_bboxes(bbox_output)
-
-
-def crop_box_from_pdf_bbox(
-    bbox: tuple[float, float, float, float],
-    *,
-    page_width_points: float,
-    page_height_points: float,
-    dpi: int,
-    padding: int,
-) -> CropBox:
-    left_points, bottom_points, right_points, top_points = bbox
-    left = math.floor((left_points / 72.0) * dpi) - padding
-    top = math.floor(((page_height_points - top_points) / 72.0) * dpi) - padding
-    right = math.ceil((right_points / 72.0) * dpi) + padding
-    bottom = math.ceil(((page_height_points - bottom_points) / 72.0) * dpi) + padding
-
-    left = max(0, left)
-    top = max(0, top)
-    right = min(math.ceil((page_width_points / 72.0) * dpi), right)
-    bottom = min(math.ceil((page_height_points / 72.0) * dpi), bottom)
-
-    full_width = math.ceil((page_width_points / 72.0) * dpi)
-    full_height = math.ceil((page_height_points / 72.0) * dpi)
-    cropped_width = max(1, right - left)
-    cropped_height = max(1, bottom - top)
-
-    # Tiny mark-only pages should stay full size instead of collapsing to a stamp-like page.
-    if cropped_width < max(32, int(full_width * 0.10)) or cropped_height < max(32, int(full_height * 0.10)):
-        return CropBox(left=0, top=0, width=full_width, height=full_height)
-
-    return CropBox(
-        left=left,
-        top=top,
-        width=cropped_width,
-        height=cropped_height,
-    )
-
-
-def extract_page_text_bboxes(
-    pdf_path: Path,
-    page_count: int,
-    work_dir: Path,
-    logger: logging.Logger | None = None,
-) -> list[tuple[float, float, float, float, float, float] | None]:
-    """Run pdftohtml -xml and return per-page (left, top, right, bottom, page_w, page_h) in points.
-    Coordinates are top-down (y=0 at top of page). Returns None per page if no text found."""
-    if shutil.which("pdftohtml") is None:
-        if logger is not None:
-            logger.warning("pdftohtml not found; text bbox extraction unavailable.")
-        return [None] * page_count
-
-    output_prefix = work_dir / "layout"
-    try:
-        run_command(["pdftohtml", "-xml", "-i", str(pdf_path), str(output_prefix)])
-    except subprocess.CalledProcessError as error:
-        if logger is not None:
-            logger.warning("pdftohtml layout extraction failed: %s", error)
-        return [None] * page_count
-
-    xml_path = output_prefix.with_suffix(".xml")
-    if not xml_path.exists():
-        if logger is not None:
-            logger.warning("pdftohtml produced no layout XML.")
-        return [None] * page_count
-
-    try:
-        root = ET.parse(xml_path).getroot()
-    except ET.ParseError as error:
-        if logger is not None:
-            logger.warning("Layout XML parse error: %s", error)
-        return [None] * page_count
-
-    bboxes: list[tuple[float, float, float, float, float, float] | None] = [None] * page_count
-
-    for page_elem in root.findall("page"):
-        num_str = page_elem.attrib.get("number", "")
-        if not num_str.isdigit():
-            continue
-        page_num = int(num_str)
-        if page_num < 1 or page_num > page_count:
-            continue
-
-        page_w = float(page_elem.attrib.get("width", 0))
-        page_h = float(page_elem.attrib.get("height", 0))
-
-        min_left = float("inf")
-        min_top = float("inf")
-        max_right = float("-inf")
-        max_bottom = float("-inf")
-
-        for text_elem in page_elem.findall("text"):
-            try:
-                left = float(text_elem.attrib["left"])
-                top = float(text_elem.attrib["top"])
-                w = float(text_elem.attrib["width"])
-                h = float(text_elem.attrib["height"])
-            except (KeyError, ValueError):
-                continue
-            if w <= 0 or h <= 0:
-                continue
-            min_left = min(min_left, left)
-            min_top = min(min_top, top)
-            max_right = max(max_right, left + w)
-            max_bottom = max(max_bottom, top + h)
-
-        if min_left != float("inf"):
-            bboxes[page_num - 1] = (min_left, min_top, max_right, max_bottom, page_w, page_h)
-
-    return bboxes
-
-
-def crop_box_from_text_bbox(
-    text_bbox: tuple[float, float, float, float, float, float],
-    *,
-    dpi: int,
-    padding: int,
-) -> CropBox:
-    """Convert a pdftohtml text bbox (points, top-down) to a pixel CropBox."""
-    left_pt, top_pt, right_pt, bottom_pt, page_w_pt, page_h_pt = text_bbox
-    scale = dpi / 72.0
-
-    full_w = math.ceil(page_w_pt * scale)
-    full_h = math.ceil(page_h_pt * scale)
-
-    left = max(0, math.floor(left_pt * scale) - padding)
-    top = max(0, math.floor(top_pt * scale) - padding)
-    right = min(full_w, math.ceil(right_pt * scale) + padding)
-    bottom = min(full_h, math.ceil(bottom_pt * scale) + padding)
-
-    cropped_w = max(1, right - left)
-    cropped_h = max(1, bottom - top)
-
-    if cropped_w < max(32, int(full_w * 0.10)) or cropped_h < max(32, int(full_h * 0.10)):
-        return CropBox(left=0, top=0, width=full_w, height=full_h)
-
-    return CropBox(left=left, top=top, width=cropped_w, height=cropped_h)
 
 
 def extract_outline(pdf_path: Path, work_dir: Path, logger: logging.Logger | None = None) -> list[TocEntry]:
@@ -779,8 +373,6 @@ def convert_pdf_to_epub(
     output_epub: Path,
     *,
     dpi: int = 150,
-    white_threshold: int = 245,
-    padding: int = 16,
     language: str = "ko",
     keep_temp: bool = False,
     logger: logging.Logger | None = None,
@@ -793,7 +385,6 @@ def convert_pdf_to_epub(
         raise SystemExit(f"Input file is not a PDF: {input_pdf}")
 
     page_count = parse_pdf_page_count(input_pdf)
-    page_width_points, page_height_points = parse_pdf_page_size_points(input_pdf)
     pdf_title, pdf_author = parse_pdf_metadata(input_pdf)
     title = pdf_title or input_pdf.stem
     author = pdf_author or "Unknown"
@@ -803,49 +394,17 @@ def convert_pdf_to_epub(
         logger.info("Input PDF: %s", input_pdf)
         logger.info("Output EPUB: %s", output_epub)
         logger.info("Pages: %s", page_count)
-        logger.info("Page size (pt): %sx%s", page_width_points, page_height_points)
-        logger.info("DPI=%s padding=%s white_threshold=%s keep_temp=%s", dpi, padding, white_threshold, keep_temp)
+        logger.info("DPI=%s keep_temp=%s", dpi, keep_temp)
 
     temp_dir_path: Path | None = None
     with tempfile.TemporaryDirectory(prefix="pdf2epub-") as temp_dir:
         temp_dir_path = Path(temp_dir)
         try:
-            ppm_dir = temp_dir_path / "ppm"
             image_dir = temp_dir_path / "images"
-            ppm_dir.mkdir(parents=True, exist_ok=True)
             image_dir.mkdir(parents=True, exist_ok=True)
 
             if logger is not None:
                 logger.info("Working directory: %s", temp_dir_path)
-
-            # 1순위: pdftohtml 텍스트 bbox
-            text_bboxes: list[tuple[float, float, float, float, float, float] | None] = [None] * page_count
-            if shutil.which("pdftohtml") is not None:
-                text_bboxes = extract_page_text_bboxes(input_pdf, page_count, temp_dir_path, logger=logger)
-                text_bbox_count = sum(1 for b in text_bboxes if b is not None)
-                if logger is not None:
-                    logger.info("pdftohtml text bbox: %s/%s pages with text detected.", text_bbox_count, page_count)
-            elif logger is not None:
-                logger.warning("pdftohtml not found; skipping text bbox extraction.")
-
-            # 2순위 폴백: Ghostscript bbox
-            page_bboxes: list[tuple[float, float, float, float]] | None = None
-            if shutil.which("gs") is not None:
-                try:
-                    candidate_bboxes = extract_page_bboxes(input_pdf)
-                    if len(candidate_bboxes) == page_count:
-                        page_bboxes = candidate_bboxes
-                        if logger is not None:
-                            logger.info("Ghostscript bbox extracted for %s pages (fallback).", page_count)
-                    elif logger is not None:
-                        logger.warning(
-                            "Ghostscript bbox count mismatch: expected %s got %s.",
-                            page_count,
-                            len(candidate_bboxes),
-                        )
-                except Exception:
-                    if logger is not None:
-                        logger.exception("Ghostscript bbox extraction failed.")
 
             outline_entries = extract_outline(input_pdf, temp_dir_path, logger=logger)
             if logger is not None:
@@ -854,51 +413,10 @@ def convert_pdf_to_epub(
             pages: list[PageAsset] = []
 
             for page_number in range(1, page_count + 1):
-                idx = page_number - 1
-                ppm_w = ppm_h = 0
-                method = "unknown"
-                bbox_info = ""
-                crop_box = CropBox(left=0, top=0, width=1, height=1)
                 png_path = image_dir / f"page-{page_number:04d}.png"
 
                 try:
-                    ppm_path = render_page_to_ppm(input_pdf, page_number, dpi, ppm_dir / "page")
-                    ppm_w, ppm_h = read_ppm_size(ppm_path)
-
-                    text_bbox = text_bboxes[idx]
-                    gs_bbox = page_bboxes[idx] if page_bboxes is not None else None
-
-                    if text_bbox is not None:
-                        method = "pdftohtml"
-                        crop_box = crop_box_from_text_bbox(text_bbox, dpi=dpi, padding=padding)
-                        bbox_info = (
-                            f"text_bbox=({text_bbox[0]:.1f},{text_bbox[1]:.1f})-"
-                            f"({text_bbox[2]:.1f},{text_bbox[3]:.1f})pt "
-                            f"page={text_bbox[4]:.1f}x{text_bbox[5]:.1f}pt"
-                        )
-                    elif gs_bbox is not None:
-                        method = "ghostscript"
-                        crop_box = crop_box_from_pdf_bbox(
-                            gs_bbox,
-                            page_width_points=page_width_points,
-                            page_height_points=page_height_points,
-                            dpi=dpi,
-                            padding=padding,
-                        )
-                        bbox_info = (
-                            f"gs_bbox=({gs_bbox[0]:.1f},{gs_bbox[1]:.1f})-"
-                            f"({gs_bbox[2]:.1f},{gs_bbox[3]:.1f})pt"
-                        )
-                    else:
-                        method = "ppm-raster"
-                        crop_box = detect_crop_box_from_ppm(
-                            ppm_path,
-                            white_threshold=white_threshold,
-                            padding=padding,
-                        )
-                        bbox_info = "pixel analysis"
-
-                    width, height = crop_ppm_to_png(ppm_path, png_path, crop_box)
+                    width, height = render_page_to_png(input_pdf, page_number, dpi, png_path)
                 except Exception:
                     if logger is not None:
                         logger.exception("Failed while processing page %s/%s", page_number, page_count)
@@ -915,14 +433,7 @@ def convert_pdf_to_epub(
                 )
 
                 if logger is not None:
-                    logger.info(
-                        "Page %s/%s | rendered=%sx%s | method=%s | %s | crop=left:%s top:%s w:%s h:%s | output=%sx%s",
-                        page_number, page_count,
-                        ppm_w, ppm_h,
-                        method, bbox_info,
-                        crop_box.left, crop_box.top, crop_box.width, crop_box.height,
-                        width, height,
-                    )
+                    logger.info("Page %s/%s | output=%sx%s", page_number, page_count, width, height)
 
             filtered_toc = [entry for entry in outline_entries if 1 <= entry.page_index <= page_count]
             if logger is not None:
@@ -960,7 +471,7 @@ def convert_pdf_to_epub(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Convert a PDF to a cropped fixed-layout EPUB."
+        description="Convert a PDF to a fixed-layout EPUB."
     )
     parser.add_argument("input_pdf", type=Path, help="Path to the input PDF file")
     parser.add_argument(
@@ -971,18 +482,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the output EPUB file",
     )
     parser.add_argument("--dpi", type=int, default=150, help="Rasterization DPI (default: 150)")
-    parser.add_argument(
-        "--white-threshold",
-        type=int,
-        default=245,
-        help="Treat pixels below this RGB value as content (default: 245)",
-    )
-    parser.add_argument(
-        "--padding",
-        type=int,
-        default=16,
-        help="Padding to add back after auto-crop in pixels (default: 16)",
-    )
     parser.add_argument("--language", default="ko", help="EPUB language code (default: ko)")
     parser.add_argument(
         "--log-file",
@@ -1012,8 +511,6 @@ def main() -> None:
             input_pdf=input_pdf,
             output_epub=output_epub,
             dpi=args.dpi,
-            white_threshold=args.white_threshold,
-            padding=args.padding,
             language=args.language,
             keep_temp=args.keep_temp,
             logger=logger,
