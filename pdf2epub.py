@@ -128,6 +128,192 @@ def parse_pdf_metadata(pdf_path: Path) -> tuple[str, str]:
 
 
 
+def _markdown_to_html_body(md_text: str) -> str:
+    """마크다운을 HTML body 내용으로 변환한다."""
+    import re as _re
+    # 이미지 마크다운 제거 (![](...))
+    md_text = _re.sub(r'!\[[^\]]*\]\([^)]*\)', '', md_text)
+    # 테이블 셀 내 <br> → 공백
+    md_text = _re.sub(r'<br\s*/?>', ' ', md_text, flags=_re.IGNORECASE)
+
+    try:
+        import markdown2  # type: ignore[import]
+        return markdown2.markdown(md_text, extras=["tables", "fenced-code-blocks"])
+    except ImportError:
+        pass
+    try:
+        import markdown as md_lib  # type: ignore[import]
+        return md_lib.markdown(md_text, extensions=["extra"])
+    except ImportError:
+        pass
+
+    # fallback: 기본 변환
+    lines = md_text.splitlines()
+    html_parts: list[str] = []
+    para: list[str] = []
+
+    def flush_para() -> None:
+        if para:
+            html_parts.append(f"<p>{html.escape(' '.join(para))}</p>")
+            para.clear()
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            flush_para()
+        elif stripped.startswith("### "):
+            flush_para()
+            html_parts.append(f"<h3>{html.escape(stripped[4:])}</h3>")
+        elif stripped.startswith("## "):
+            flush_para()
+            html_parts.append(f"<h2>{html.escape(stripped[3:])}</h2>")
+        elif stripped.startswith("# "):
+            flush_para()
+            html_parts.append(f"<h1>{html.escape(stripped[2:])}</h1>")
+        else:
+            para.append(stripped)
+
+    flush_para()
+    return "\n".join(html_parts)
+
+
+def build_chapter_xhtml(page_number: int, title: str, html_body: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="ko">
+<head>
+  <title>{html.escape(title)}</title>
+  <link rel="stylesheet" type="text/css" href="../styles/reflowable.css"/>
+</head>
+<body>
+{html_body}
+</body>
+</html>
+"""
+
+
+def build_reflowable_opf(
+    identifier: str,
+    title: str,
+    author: str,
+    language: str,
+    page_count: int,
+) -> str:
+    manifest_items = [
+        '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+        '<item id="css" href="styles/reflowable.css" media-type="text/css"/>',
+    ]
+    spine_items: list[str] = []
+    for i in range(1, page_count + 1):
+        pid = f"page-{i:04d}"
+        manifest_items.append(
+            f'<item id="{pid}" href="pages/{pid}.xhtml" media-type="application/xhtml+xml"/>'
+        )
+        spine_items.append(f'<itemref idref="{pid}"/>')
+
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">{identifier}</dc:identifier>
+    <dc:title>{html.escape(title)}</dc:title>
+    <dc:language>{html.escape(language)}</dc:language>
+    <dc:creator>{html.escape(author or 'Unknown')}</dc:creator>
+    <meta property="dcterms:modified">2026-03-25T00:00:00Z</meta>
+  </metadata>
+  <manifest>
+    {''.join(manifest_items)}
+  </manifest>
+  <spine>
+    {''.join(spine_items)}
+  </spine>
+</package>
+"""
+
+
+def write_reflowable_epub(
+    *,
+    output_path: Path,
+    title: str,
+    author: str,
+    language: str,
+    pages_md: list[str],
+) -> None:
+    identifier = f"urn:uuid:{uuid.uuid4()}"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    css = """body { font-family: serif; line-height: 1.6; margin: 1em 2em; }
+h1, h2, h3 { margin-top: 1.2em; }
+p { margin: 0.6em 0; }
+"""
+    opf = build_reflowable_opf(identifier, title, author, language, len(pages_md))
+    nav_xhtml = build_nav_document(title)
+
+    with zipfile.ZipFile(output_path, "w") as epub:
+        epub.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        epub.writestr(
+            "META-INF/container.xml",
+            """<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>
+""",
+        )
+        epub.writestr("OEBPS/styles/reflowable.css", css)
+        epub.writestr("OEBPS/nav.xhtml", nav_xhtml)
+        epub.writestr("OEBPS/content.opf", opf)
+
+        for i, md_text in enumerate(pages_md):
+            page_number = i + 1
+            page_id = f"page-{page_number:04d}"
+            spine_title = f"{title} - Page {page_number}"
+            html_body = _markdown_to_html_body(md_text)
+            epub.writestr(
+                f"OEBPS/pages/{page_id}.xhtml",
+                build_chapter_xhtml(page_number, spine_title, html_body),
+            )
+
+
+def convert_pdf_to_epub_text_mode(
+    input_pdf: Path,
+    output_epub: Path,
+    *,
+    language: str = "ko",
+    logger: logging.Logger | None = None,
+    crop_rects: dict[int, tuple[float, float, float, float] | None] | None = None,
+) -> None:
+    """marker 를 사용해 텍스트 기반 리플로우 EPUB 을 생성한다."""
+    from marker_extractor import load_models, extract_pages_markdown  # type: ignore[import]
+
+    if not input_pdf.exists():
+        raise SystemExit(f"Input PDF not found: {input_pdf}")
+
+    pdf_title, pdf_author = parse_pdf_metadata(input_pdf)
+    title = pdf_title or input_pdf.stem
+    author = pdf_author or "Unknown"
+
+    if logger:
+        logger.info("텍스트 모드 변환 시작: %s → %s", input_pdf, output_epub)
+
+    models = load_models()
+    pages_md = extract_pages_markdown(input_pdf, models, crop_rects=crop_rects)
+
+    if logger:
+        logger.info("%d 페이지 마크다운 추출 완료, EPUB 빌드 중...", len(pages_md))
+
+    write_reflowable_epub(
+        output_path=output_epub,
+        title=title,
+        author=author,
+        language=language,
+        pages_md=pages_md,
+    )
+
+    if logger:
+        logger.info("텍스트 모드 변환 완료: %s", output_epub)
+
+
 def build_nav_document(title: str) -> str:
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>

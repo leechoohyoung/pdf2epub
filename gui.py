@@ -1,6 +1,36 @@
 # gui.py
 from __future__ import annotations
 
+import subprocess
+import sys
+
+# ── 부트스트랩: 필수 패키지 자동 설치 ─────────────────────────────────────────
+_REQUIRED_PACKAGES = [
+    ("PyMuPDF", "fitz"),
+    ("marker-pdf", "marker"),
+]
+
+def _install(package: str) -> bool:
+    """pip 으로 패키지를 설치한다. 성공 여부를 반환한다."""
+    pip_args = [sys.executable, "-m", "pip", "install", "-q", package]
+    # Homebrew Python 등 시스템 격리 환경에서는 --break-system-packages 필요
+    r = subprocess.run(pip_args + ["--break-system-packages"], capture_output=True)
+    if r.returncode != 0:
+        r = subprocess.run(pip_args, capture_output=True)
+    return r.returncode == 0
+
+for _pkg, _imp in _REQUIRED_PACKAGES:
+    try:
+        __import__(_imp)
+    except ImportError:
+        print(f"[bootstrap] {_pkg} 설치 중...", flush=True)
+        if _install(_pkg):
+            print(f"[bootstrap] {_pkg} 설치 완료", flush=True)
+        else:
+            print(f"[bootstrap] 오류: {_pkg} 설치 실패. 수동으로 설치해주세요: pip install {_pkg}", flush=True)
+            sys.exit(1)
+# ──────────────────────────────────────────────────────────────────────────────
+
 import base64
 import logging
 import threading
@@ -48,6 +78,88 @@ _HANDLE_AXES: dict[str, tuple[int, int]] = {
 }
 
 
+# ── 로그 핸들러 / tqdm 라우터 ────────────────────────────────────────────────
+
+import re as _re
+
+class _GUILogHandler(logging.Handler):
+    """Python 로그 레코드를 tk.Text 위젯으로 라우팅한다."""
+
+    def __init__(self, widget: "tk.Text") -> None:
+        super().__init__()
+        self._widget = widget
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self.format(record) + "\n"
+            self._widget.after(0, self._append, msg)
+        except Exception:
+            pass
+
+    def _append(self, msg: str) -> None:
+        try:
+            self._widget.config(state="normal")
+            self._widget.insert("end", msg)
+            self._widget.see("end")
+            self._widget.config(state="disabled")
+        except tk.TclError:
+            pass
+
+
+class _TqdmRouter:
+    """sys.stderr 를 가로채 tqdm 출력을 파싱해 상태/진행률 콜백으로 라우팅한다.
+
+    tqdm 줄 예: "Recognizing Layout:  45%|███| 249/553 [11:21<13:51,  2.74s/it]"
+    """
+
+    _TQDM_RE = _re.compile(
+        r"^(?P<stage>[^:]+):\s+(?P<pct>\d+)%\|[^|]*\|\s*(?P<cur>\d+)/(?P<tot>\d+)"
+    )
+
+    def __init__(self, log_fn, status_fn, progress_fn) -> None:
+        self._log = log_fn
+        self._status = status_fn
+        self._progress = progress_fn
+        self._orig_stderr = None
+        self._buf = ""
+
+    def __enter__(self) -> "_TqdmRouter":
+        self._orig_stderr = sys.stderr
+        sys.stderr = self
+        return self
+
+    def __exit__(self, *_) -> None:
+        sys.stderr = self._orig_stderr
+
+    def write(self, text: str) -> None:
+        if self._orig_stderr:
+            self._orig_stderr.write(text)
+        self._buf += text
+        # \r 또는 \n 기준으로 줄 분리
+        parts = _re.split(r"[\r\n]", self._buf)
+        self._buf = parts[-1]
+        for line in parts[:-1]:
+            line = line.strip()
+            if not line:
+                continue
+            m = self._TQDM_RE.match(line)
+            if m:
+                stage = m.group("stage").strip()
+                pct   = int(m.group("pct"))
+                cur   = m.group("cur")
+                tot   = m.group("tot")
+                self._status(f"{stage}: {cur}/{tot}")
+                self._progress(pct)
+                if pct == 100:
+                    self._log(f"✓ {stage} 완료 ({tot})\n")
+            else:
+                self._log(line + "\n")
+
+    def flush(self) -> None:
+        if self._orig_stderr:
+            self._orig_stderr.flush()
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
@@ -80,6 +192,9 @@ class App(tk.Tk):
         self._pulse_job: Optional[str] = None
         self._pulse_value: int = 0
         self._pulse_direction: int = 1
+
+        self._var_text_mode = tk.BooleanVar(value=False)
+        self._log_panel_visible: bool = False
 
         self._build_ui()
         log.info("UI 빌드 완료")
@@ -153,15 +268,54 @@ class App(tk.Tk):
             w.bind("<Button-4>",   self._on_thumb_scroll)
             w.bind("<Button-5>",   self._on_thumb_scroll)
 
-        # 2) 상태바 — 썸네일 바로 위
-        status_frame = tk.Frame(self, bd=1, relief="sunken")
-        status_frame.pack(fill="x", side="bottom")
+        # 2) 아코디언 상태바 — 썸네일 바로 위
+        accordion = tk.Frame(self, bd=1, relief="sunken")
+        accordion.pack(fill="x", side="bottom")
 
-        self._status_label = tk.Label(status_frame, text="준비", anchor="w", padx=6)
+        # 2-a) 로그 패널 (접힘 상태로 시작, pack_propagate=False 로 높이 고정)
+        self._log_panel = tk.Frame(accordion, height=160)
+        self._log_panel.pack_propagate(False)
+        _log_sb = ttk.Scrollbar(self._log_panel, orient="vertical")
+        _log_sb.pack(side="right", fill="y")
+        self._log_text = tk.Text(
+            self._log_panel,
+            bg="#1e1e1e", fg="#d4d4d4",
+            font=("Courier", 9),
+            state="disabled",
+            wrap="word",
+            yscrollcommand=_log_sb.set,
+        )
+        self._log_text.pack(side="left", fill="both", expand=True)
+        _log_sb.config(command=self._log_text.yview)
+        # 초기에는 숨김 (pack 하지 않음)
+
+        # 2-b) 헤더 행 (항상 표시)
+        self._accordion_header = tk.Frame(accordion)
+        self._accordion_header.pack(fill="x")
+
+        self._log_toggle_btn = tk.Button(
+            self._accordion_header, text="▶", width=2,
+            relief="flat", command=self._toggle_log_panel,
+        )
+        self._log_toggle_btn.pack(side="left", padx=2, pady=1)
+
+        self._status_label = tk.Label(
+            self._accordion_header, text="준비", anchor="w", padx=4,
+        )
         self._status_label.pack(side="left", fill="x", expand=True)
 
-        self._progress_bar = ttk.Progressbar(status_frame, length=200, mode="determinate")
+        self._progress_bar = ttk.Progressbar(
+            self._accordion_header, length=200, mode="determinate",
+        )
         self._progress_bar.pack(side="right", padx=6, pady=2)
+
+        # 2-c) GUI 로그 핸들러 등록 (INFO 이상만 표시)
+        _gui_handler = _GUILogHandler(self._log_text)
+        _gui_handler.setLevel(logging.INFO)
+        _gui_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)-8s] %(message)s", datefmt="%H:%M:%S",
+        ))
+        logging.getLogger().addHandler(_gui_handler)
 
         # 3) Convert / Cancel 버튼 — 상태바 바로 위
         btn_frame = tk.Frame(self)
@@ -171,6 +325,11 @@ class App(tk.Tk):
         self._btn_convert.pack(side="right", padx=4, pady=4)
         tk.Button(btn_frame, text="Cancel", width=12,
                   command=self.destroy).pack(side="right", padx=4, pady=4)
+        tk.Checkbutton(
+            btn_frame,
+            text="텍스트 추출 모드 (실험적)",
+            variable=self._var_text_mode,
+        ).pack(side="left", padx=8)
 
         log.debug("_build_ui 완료")
 
@@ -221,6 +380,38 @@ class App(tk.Tk):
         self._btn_prev.config(state=state)
         self._btn_next.config(state=state)
         log.debug("UI %s", "잠금" if lock else "잠금 해제")
+
+    # ── 로그 패널 헬퍼 ───────────────────────────────────────────────────────
+
+    def _toggle_log_panel(self) -> None:
+        if self._log_panel_visible:
+            self._log_panel.pack_forget()
+            self._log_toggle_btn.config(text="▶")
+            self._log_panel_visible = False
+        else:
+            self._log_panel.pack(
+                fill="both", expand=True,
+                before=self._accordion_header,
+            )
+            self._log_toggle_btn.config(text="▼")
+            self._log_panel_visible = True
+
+    def _append_log(self, msg: str) -> None:
+        """스레드에서 호출 가능한 로그 텍스트 추가."""
+        def _do() -> None:
+            try:
+                self._log_text.config(state="normal")
+                self._log_text.insert("end", msg)
+                self._log_text.see("end")
+                self._log_text.config(state="disabled")
+            except tk.TclError:
+                pass
+        self.after(0, _do)
+
+    def _set_progress_direct(self, pct: int) -> None:
+        """펄스 애니메이션을 중지하고 실제 진행률(0-100)을 표시한다."""
+        self._stop_pulse()
+        self._progress_bar.config(mode="determinate", maximum=100, value=pct)
 
     # ── PDF 열기 ─────────────────────────────────────────────────────────────
 
@@ -771,9 +962,15 @@ class App(tk.Tk):
             log.info("저장 경로 선택 취소")
             return
 
-        log.info("변환 시작: %s → %s", self._pdf_path, output_path)
+        use_text_mode = self._var_text_mode.get()
+        log.info("변환 시작: %s → %s (텍스트 모드: %s)", self._pdf_path, output_path, use_text_mode)
         self._lock_ui(True)
-        self._set_status("EPUB 변환 중...", indeterminate=True)
+        if not self._log_panel_visible:
+            self._toggle_log_panel()
+        self._set_status(
+            "marker 모델 로딩 중..." if use_text_mode else "EPUB 변환 중...",
+            indeterminate=True,
+        )
 
         import sys
         import importlib.util
@@ -790,21 +987,39 @@ class App(tk.Tk):
         log.debug("변환 crop_rects 수: %d", len(crop_rects))
 
         def worker() -> None:
-            try:
-                module.convert_pdf_to_epub(
-                    input_pdf=self._pdf_path,
-                    output_epub=out,
-                    crop_rects=crop_rects,
-                )
-                log.info("변환 완료: %s", out)
-                self.after(0, lambda: messagebox.showinfo(
-                    "완료", f"변환이 완료됐습니다:\n{out}"))
-            except Exception as exc:
-                log.exception("변환 실패: %s", exc)
-                self.after(0, lambda: messagebox.showerror("변환 실패", str(exc)))
-            finally:
-                self.after(0, lambda: self._set_status("준비"))
-                self.after(0, lambda: self._lock_ui(False))
+            with _TqdmRouter(
+                log_fn=self._append_log,
+                status_fn=lambda s: self.after(
+                    0, lambda _s=s: self._status_label.config(text=_s)
+                ),
+                progress_fn=lambda p: self.after(
+                    0, lambda _p=p: self._set_progress_direct(_p)
+                ),
+            ):
+                try:
+                    if use_text_mode:
+                        self.after(0, lambda: self._set_status("텍스트 추출 중...", indeterminate=True))
+                        module.convert_pdf_to_epub_text_mode(
+                            input_pdf=self._pdf_path,
+                            output_epub=out,
+                            crop_rects=crop_rects if crop_rects else None,
+                        )
+                    else:
+                        module.convert_pdf_to_epub(
+                            input_pdf=self._pdf_path,
+                            output_epub=out,
+                            crop_rects=crop_rects,
+                        )
+                    log.info("변환 완료: %s", out)
+                    self.after(0, lambda: messagebox.showinfo(
+                        "완료", f"변환이 완료됐습니다:\n{out}"))
+                except Exception as exc:
+                    msg = str(exc)
+                    log.exception("변환 실패: %s", msg)
+                    self.after(0, lambda m=msg: messagebox.showerror("변환 실패", m))
+                finally:
+                    self.after(0, lambda: self._set_status("준비"))
+                    self.after(0, lambda: self._lock_ui(False))
 
         threading.Thread(target=worker, daemon=True).start()
 

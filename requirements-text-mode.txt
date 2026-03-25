@@ -1,0 +1,3 @@
+# 텍스트 추출 모드 (실험적) — marker-pdf 와 의존 패키지
+# 설치: pip install -r requirements-text-mode.txt
+marker-pdf>=1.10.0
