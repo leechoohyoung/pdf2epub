@@ -13,9 +13,9 @@ from crop_store import CropStore
 from validator import Validator
 
 
-VIEWER_WIDTH = 700
-VIEWER_HEIGHT = 900
-THUMBNAIL_SIZE = (80, 110)
+VIEWER_WIDTH = 900
+VIEWER_HEIGHT = 1100
+THUMBNAIL_SIZE = (100, 140)
 THUMBNAIL_DPI = 36
 VIEWER_DPI = 120
 
@@ -24,7 +24,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("PDF to EPUB Converter")
-        self.resizable(False, False)
+        self.resizable(True, True)
 
         self._pdf_path: Optional[Path] = None
         self._page_count: int = 0
@@ -37,6 +37,8 @@ class App(tk.Tk):
         # 현재 뷰어에 표시된 페이지의 렌더 스케일 (pt → px)
         self._scale_x: float = 1.0
         self._scale_y: float = 1.0
+
+        self._resize_job: Optional[str] = None
 
         self._build_ui()
         self._open_pdf()
@@ -59,10 +61,11 @@ class App(tk.Tk):
         self._canvas = tk.Canvas(center_frame,
                                   width=VIEWER_WIDTH, height=VIEWER_HEIGHT,
                                   bg="#888", cursor="crosshair")
-        self._canvas.pack(side="left")
+        self._canvas.pack(side="left", fill="both", expand=True)
         self._canvas.bind("<ButtonPress-1>", self._on_drag_start)
         self._canvas.bind("<B1-Motion>", self._on_drag_move)
         self._canvas.bind("<ButtonRelease-1>", self._on_drag_end)
+        self._canvas.bind("<Configure>", self._on_canvas_resize)
 
         self._btn_next = tk.Button(center_frame, text=">>", width=4,
                                    command=self._next_page)
@@ -114,11 +117,16 @@ class App(tk.Tk):
     def _render_page(self, page_number: int) -> None:
         if self._pdf_path is None:
             return
+        cw = self._canvas.winfo_width()
+        ch = self._canvas.winfo_height()
+        # 위젯이 아직 배치되지 않은 경우 기본값 사용
+        if cw < 2:
+            cw = VIEWER_WIDTH
+        if ch < 2:
+            ch = VIEWER_HEIGHT
         with fitz.open(str(self._pdf_path)) as doc:
             page = doc[page_number - 1]
-            # 뷰어 크기에 맞게 스케일 계산
-            scale = min(VIEWER_WIDTH / page.rect.width,
-                        VIEWER_HEIGHT / page.rect.height)
+            scale = min(cw / page.rect.width, ch / page.rect.height)
             mat = fitz.Matrix(scale, scale)
             pix = page.get_pixmap(matrix=mat)
             self._scale_x = pix.width / page.rect.width
@@ -126,7 +134,6 @@ class App(tk.Tk):
 
         png_data = pix.tobytes("png")
         photo = tk.PhotoImage(data=base64.b64encode(png_data))
-        self._canvas.config(width=pix.width, height=pix.height)
         self._canvas.delete("all")
         self._canvas.create_image(0, 0, anchor="nw", image=photo)
         self._canvas._photo = photo  # GC 방지
@@ -236,6 +243,14 @@ class App(tk.Tk):
         self._thumb_canvas.config(
             scrollregion=self._thumb_canvas.bbox("all")
         )
+
+    # ── 창 리사이즈 ───────────────────────────────────────────
+
+    def _on_canvas_resize(self, event: tk.Event) -> None:
+        """창 크기 변경 시 페이지를 재렌더링한다 (디바운스 150ms)."""
+        if self._resize_job is not None:
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(150, self._render_page, self._current_page)
 
     # ── 네비게이션 ────────────────────────────────────────────
 
