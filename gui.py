@@ -468,6 +468,19 @@ class App(tk.Tk):
         rect = self._crop_store.get(self._current_page)
         if rect is None:
             return
+
+        # 새 기본값을 저장하기 전에, 현재 페이지 이전 페이지 중
+        # 명시적 override 가 없는 페이지를 기존 default 로 고정한다.
+        # (예: 1페이지에서 a를 기본값으로 저장 → n+1페이지에서 b를 새 기본값으로 저장할 때
+        #  2~n 페이지는 a로 freeze 되어야 한다.)
+        old_default = self._crop_store.get_default()
+        if old_default is not None:
+            for p in range(1, self._current_page):
+                if not self._crop_store.has_override(p):
+                    self._crop_store.set(p, old_default)
+            log.info("기존 기본값 %s → 페이지 1~%d 중 override 없는 페이지에 고정",
+                     old_default, self._current_page - 1)
+
         log.info("기본값 저장: %s (페이지 %d에서)", rect, self._current_page)
         self._crop_store.set_default(rect)
         self._update_crop_label(self._current_page)
