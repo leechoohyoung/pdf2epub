@@ -259,7 +259,7 @@ def convert_pdf_to_epub(
     language: str = "ko",
     keep_temp: bool = False,
     logger: logging.Logger | None = None,
-    crop_rects: dict[int, tuple[float, float, float, float]] | None = None,
+    crop_rects: dict[int, tuple[float, float, float, float] | None] | None = None,
 ) -> None:
     require_commands(REQUIRED_COMMANDS)
 
