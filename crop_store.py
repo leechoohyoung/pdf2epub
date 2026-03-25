@@ -23,6 +23,9 @@ class CropStore:
     def get(self, page_number: int) -> Rect | None:
         return self._overrides.get(page_number, self._default)
 
+    def get_default(self) -> Rect | None:
+        return self._default
+
     def has_override(self, page_number: int) -> bool:
         return page_number in self._overrides
 
