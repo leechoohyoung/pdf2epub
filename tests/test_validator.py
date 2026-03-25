@@ -38,3 +38,18 @@ class ValidatorTests(unittest.TestCase):
             clipped = v.find_clipped_pages({1: (0, 0, 400, 600), 2: (0, 0, 200, 300)})
             self.assertIn(2, clipped)
             self.assertNotIn(1, clipped)
+
+    def test_none_rect_page_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = self._make_pdf(Path(tmp))
+            v = Validator(pdf_path)
+            # 페이지 2의 rect가 None이면 잘림 여부와 무관하게 건너뜀
+            clipped = v.find_clipped_pages({1: (0, 0, 400, 600), 2: None})
+            self.assertEqual(clipped, [])
+
+    def test_result_is_sorted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pdf_path = self._make_pdf(Path(tmp))
+            v = Validator(pdf_path)
+            clipped = v.find_clipped_pages({2: (0, 0, 200, 300), 1: (0, 0, 200, 300)})
+            self.assertEqual(clipped, sorted(clipped))

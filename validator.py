@@ -35,11 +35,11 @@ class Validator:
             # type=1 은 이미지 블록 — 배경 이미지가 전체 페이지를 덮을 수 있으므로 텍스트만 검사
             if block.get("type") != 0:
                 continue
-            if not fitz.Rect(block["bbox"]).is_empty:
-                if not crop.contains(fitz.Rect(block["bbox"])):
-                    return True
+            bbox = fitz.Rect(block["bbox"])
+            if not bbox.is_empty and not crop.contains(bbox):
+                return True
         for drawing in page.get_drawings():
-            if not fitz.Rect(drawing["rect"]).is_empty:
-                if not crop.contains(fitz.Rect(drawing["rect"])):
-                    return True
+            bbox = fitz.Rect(drawing["rect"])
+            if not bbox.is_empty and not crop.contains(bbox):
+                return True
         return False
