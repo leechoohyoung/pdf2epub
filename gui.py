@@ -65,6 +65,8 @@ class App(tk.Tk):
 
         self._scale_x: float = 1.0
         self._scale_y: float = 1.0
+        self._img_offset_x: float = 0.0   # 캔버스 내 이미지 좌상단 x (중앙 정렬용)
+        self._img_offset_y: float = 0.0   # 캔버스 내 이미지 좌상단 y
 
         self._drag_mode: str = "none"   # "new_crop" | "handle"
         self._drag_start: Optional[tuple[int, int]] = None
@@ -134,7 +136,8 @@ class App(tk.Tk):
         h_scrollbar = ttk.Scrollbar(thumb_outer, orient="horizontal")
         h_scrollbar.pack(side="bottom", fill="x")
 
-        self._thumb_canvas = tk.Canvas(thumb_outer, xscrollcommand=h_scrollbar.set)
+        self._thumb_canvas = tk.Canvas(thumb_outer, xscrollcommand=h_scrollbar.set,
+                                        xscrollincrement=THUMBNAIL_SIZE[0] + 8)
         h_scrollbar.configure(command=self._thumb_canvas.xview)
         self._thumb_canvas.pack(fill="both", expand=True)
 
@@ -182,7 +185,8 @@ class App(tk.Tk):
             self._progress_bar.stop()
             self._progress_bar.config(mode="determinate",
                                        maximum=max(maximum, 1), value=value)
-        self.update_idletasks()
+        # update_idletasks() 를 여기서 호출하면 ArrangePacking 이 누적된
+        # 모든 위젯을 재배치해 O(n²) 레이아웃 폭발이 발생하므로 호출하지 않는다.
 
     def _lock_ui(self, lock: bool) -> None:
         """변환/썸네일 생성 중 버튼을 비활성화한다."""
@@ -248,8 +252,15 @@ class App(tk.Tk):
 
         png_data = pix.tobytes("png")
         photo = tk.PhotoImage(data=base64.b64encode(png_data))
+
+        # 이미지를 캔버스 중앙에 배치
+        self._img_offset_x = (cw - pix.width) / 2
+        self._img_offset_y = (ch - pix.height) / 2
+        log.debug("이미지 offset: (%.1f, %.1f)", self._img_offset_x, self._img_offset_y)
+
         self._canvas.delete("all")
-        self._canvas.create_image(0, 0, anchor="nw", image=photo)
+        self._canvas.create_image(self._img_offset_x, self._img_offset_y,
+                                   anchor="nw", image=photo)
         self._canvas._photo = photo
 
         rect = self._crop_store.get(page_number)
@@ -264,10 +275,12 @@ class App(tk.Tk):
     # ── 크롭 오버레이 ────────────────────────────────────────────────────────
 
     def _draw_crop_overlay(self, pdf_rect: tuple) -> None:
-        x0 = pdf_rect[0] * self._scale_x
-        y0 = pdf_rect[1] * self._scale_y
-        x1 = pdf_rect[2] * self._scale_x
-        y1 = pdf_rect[3] * self._scale_y
+        ox = self._img_offset_x
+        oy = self._img_offset_y
+        x0 = pdf_rect[0] * self._scale_x + ox
+        y0 = pdf_rect[1] * self._scale_y + oy
+        x1 = pdf_rect[2] * self._scale_x + ox
+        y1 = pdf_rect[3] * self._scale_y + oy
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
         log.debug("오버레이 그리기: canvas(%.0f,%.0f)-(%.0f,%.0f), 캔버스 %dx%d",
@@ -275,7 +288,7 @@ class App(tk.Tk):
 
         self._canvas.delete("crop_overlay")
 
-        # 바깥 마스크 (어두운 반투명)
+        # 바깥 마스크 (어두운 반투명) — 전체 캔버스 기준
         mask_kw = dict(fill="black", stipple="gray50",
                        outline="", tags="crop_overlay")
         self._canvas.create_rectangle(0,  0,  cw, y0, **mask_kw)
@@ -320,10 +333,12 @@ class App(tk.Tk):
         pdf_rect = self._crop_store.get(self._current_page)
         if pdf_rect is None:
             return None
-        x0 = pdf_rect[0] * self._scale_x
-        y0 = pdf_rect[1] * self._scale_y
-        x1 = pdf_rect[2] * self._scale_x
-        y1 = pdf_rect[3] * self._scale_y
+        ox = self._img_offset_x
+        oy = self._img_offset_y
+        x0 = pdf_rect[0] * self._scale_x + ox
+        y0 = pdf_rect[1] * self._scale_y + oy
+        x1 = pdf_rect[2] * self._scale_x + ox
+        y1 = pdf_rect[3] * self._scale_y + oy
         mx, my = (x0 + x1) / 2, (y0 + y1) / 2
         for name, (hx, hy) in {
             "nw": (x0, y0), "n": (mx, y0), "ne": (x1, y0),
@@ -369,14 +384,14 @@ class App(tk.Tk):
         elif self._drag_mode == "handle" and self._drag_pdf_rect_start is not None:
             dx = (event.x - self._drag_start[0]) / self._scale_x
             dy = (event.y - self._drag_start[1]) / self._scale_y
-            r = list(self._drag_pdf_rect_start)
+            r  = list(self._drag_pdf_rect_start)
             ax, ay = _HANDLE_AXES[self._drag_handle]
             if ax == -1: r[0] = min(r[0] + dx, r[2] - 1)
             elif ax == 1: r[2] = max(r[2] + dx, r[0] + 1)
             if ay == -1: r[1] = min(r[1] + dy, r[3] - 1)
             elif ay == 1: r[3] = max(r[3] + dy, r[1] + 1)
             self._canvas.delete("crop_overlay")
-            self._draw_crop_overlay(tuple(r))
+            self._draw_crop_overlay(tuple(r))    # offset은 _draw_crop_overlay 내부에서 적용
 
     def _on_release(self, event: tk.Event) -> None:
         if self._drag_start is None:
@@ -390,11 +405,12 @@ class App(tk.Tk):
                 log.debug("드래그 너무 짧음 — 무시")
                 self._drag_mode = "none"
                 return
+            ox, oy = self._img_offset_x, self._img_offset_y
             pdf_rect = (
-                min(sx, event.x) / self._scale_x,
-                min(sy, event.y) / self._scale_y,
-                max(sx, event.x) / self._scale_x,
-                max(sy, event.y) / self._scale_y,
+                (min(sx, event.x) - ox) / self._scale_x,
+                (min(sy, event.y) - oy) / self._scale_y,
+                (max(sx, event.x) - ox) / self._scale_x,
+                (max(sy, event.y) - oy) / self._scale_y,
             )
             log.info("새 크롭 영역 설정 (페이지 %d): %s", self._current_page, pdf_rect)
             self._save_crop(pdf_rect)
@@ -493,9 +509,18 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _finish_thumbnails(self, png_list: list[bytes]) -> None:
-        log.debug("_finish_thumbnails: 위젯 생성 시작")
-        for i, png_data in enumerate(png_list):
-            photo = tk.PhotoImage(data=base64.b64encode(png_data))
+        log.debug("_finish_thumbnails: 배치 위젯 생성 시작 (총 %d)", len(png_list))
+        self._finish_thumbnails_batch(png_list, 0)
+
+    _THUMB_BATCH = 30  # 한 번에 생성할 썸네일 수
+
+    def _finish_thumbnails_batch(self, png_list: list[bytes], start: int) -> None:
+        end = min(start + self._THUMB_BATCH, len(png_list))
+        log.debug("썸네일 위젯 생성: %d ~ %d", start + 1, end)
+
+        for i in range(start, end):
+            png_data = png_list[i]
+            photo    = tk.PhotoImage(data=base64.b64encode(png_data))
             page_num = i + 1
             cell = tk.Frame(self._thumb_frame)
             cell.pack(side="left", padx=2, pady=4)
@@ -513,12 +538,24 @@ class App(tk.Tk):
                 w.bind("<Button-4>",   self._on_thumb_scroll)
                 w.bind("<Button-5>",   self._on_thumb_scroll)
 
-        self._thumb_frame.update_idletasks()
+        if end < len(png_list):
+            self._set_status(f"썸네일 표시 중... ({end}/{len(png_list)})",
+                             value=end, maximum=len(png_list))
+            self.after(0, self._finish_thumbnails_batch, png_list, end)
+        else:
+            # update_idletasks() 를 여기서 호출하면 N개 위젯 전체 재배치가
+            # 한꺼번에 일어나 ArrangePacking O(n²) 폭발이 발생한다.
+            # after(50) 으로 Tk 가 자연스럽게 배치를 끝낸 뒤 scrollregion 을 설정한다.
+            log.info("썸네일 빌드 완료 (총 %d) — 50ms 뒤 마무리", len(png_list))
+            self.after(50, self._finalize_thumbnails)
+
+    def _finalize_thumbnails(self) -> None:
+        """배치 생성 완료 후 50ms 지연 실행 — Tk 가 위젯 배치를 마친 뒤 호출된다."""
         self._thumb_canvas.config(scrollregion=self._thumb_canvas.bbox("all"))
         self._highlight_thumb(self._current_page)
         self._lock_ui(False)
         self._set_status("준비")
-        log.info("썸네일 빌드 완료")
+        log.info("썸네일 마무리 완료")
 
     def _highlight_thumb(self, page_number: int) -> None:
         for i, btn in enumerate(self._thumb_buttons):
@@ -531,18 +568,20 @@ class App(tk.Tk):
         if not (self._thumb_buttons and 1 <= page_number <= len(self._thumb_buttons)):
             return
 
-        self._thumb_frame.update_idletasks()
-        btn = self._thumb_buttons[page_number - 1]
-        bx  = btn.winfo_x()
-        bw  = btn.winfo_width()
+        # update_idletasks() 없이 위치를 수학적으로 계산한다.
+        # 각 cell 슬롯 폭 = THUMBNAIL_SIZE[0](80) + bd*2(4) + pack padx*2(4) = 88
+        # (xscrollincrement 와 동일하게 맞춰져 있다)
+        _CELL_W = THUMBNAIL_SIZE[0] + 8  # 88px
+        bx  = (page_number - 1) * _CELL_W
+        bw  = THUMBNAIL_SIZE[0]
         cw  = self._thumb_canvas.winfo_width()
         sr  = self._thumb_canvas.bbox("all")
         if sr and sr[2] > cw:
             total_w = sr[2] - sr[0]
             target  = bx - (cw - bw) / 2
             self._thumb_canvas.xview_moveto(max(0.0, min(target / total_w, 1.0)))
-            log.debug("썸네일 스크롤: 페이지 %d, fraction=%.3f",
-                      page_number, target / total_w)
+            log.debug("썸네일 스크롤: 페이지 %d, bx=%d, fraction=%.3f",
+                      page_number, bx, target / total_w)
 
     def _on_thumb_scroll(self, event: tk.Event) -> None:
         if event.num == 4:
