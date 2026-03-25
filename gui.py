@@ -264,8 +264,78 @@ class App(tk.Tk):
         self._run_validation_then_convert()
 
     def _run_validation_then_convert(self) -> None:
-        # Task 5에서 구현
-        pass
+        assert self._pdf_path is not None
+
+        # 1. 전체 페이지 크롭 rect 수집
+        all_rects = self._crop_store.all_rects(self._page_count)
+
+        # 2. 검증
+        validator = Validator(self._pdf_path)
+        clipped = validator.find_clipped_pages(all_rects)
+
+        # 3. 잘리는 페이지 안내
+        if clipped:
+            pages_str = ", ".join(str(p) for p in clipped)
+            answer = messagebox.askyesno(
+                "콘텐츠 잘림 감지",
+                f"{pages_str} 페이지에서 지정된 영역 밖으로 콘텐츠가 잘립니다.\n"
+                "각 페이지로 이동해 영역을 조정하시겠습니까?\n\n"
+                "예 → 첫 번째 문제 페이지로 이동\n"
+                "아니오 → 현재 설정으로 그대로 변환",
+            )
+            if answer:
+                self._guide_through_clipped(clipped)
+                return  # 사용자가 조정 후 다시 Convert를 눌러야 함
+
+        # 4. 출력 경로 선택 후 변환 실행
+        self._do_convert()
+
+    def _guide_through_clipped(self, clipped_pages: list[int]) -> None:
+        """잘림이 감지된 페이지를 순서대로 안내한다."""
+        if not clipped_pages:
+            return
+        first = clipped_pages[0]
+        remaining = clipped_pages[1:]
+        msg = f"페이지 {first}로 이동합니다. 영역을 조정한 뒤 Convert를 다시 눌러주세요."
+        if remaining:
+            msg += f"\n\n아직 {len(remaining)}개 페이지가 더 있습니다: {', '.join(str(p) for p in remaining)}"
+        messagebox.showinfo("영역 조정 안내", msg)
+        self._go_to_page(first)
+
+    def _do_convert(self) -> None:
+        assert self._pdf_path is not None
+        output_path = filedialog.asksaveasfilename(
+            title="EPUB 저장 위치",
+            defaultextension=".epub",
+            initialfile=self._pdf_path.stem + ".epub",
+            filetypes=[("EPUB files", "*.epub")],
+        )
+        if not output_path:
+            return
+
+        import sys
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "pdf2epub",
+            Path(__file__).parent / "pdf2epub.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["pdf2epub"] = module  # dataclass 해석에 필요 (Python 3.14)
+        spec.loader.exec_module(module)
+
+        all_rects = self._crop_store.all_rects(self._page_count)
+        # None 제거 (None인 페이지는 get_content_bbox 사용)
+        crop_rects = {p: r for p, r in all_rects.items() if r is not None}
+
+        try:
+            module.convert_pdf_to_epub(
+                input_pdf=self._pdf_path,
+                output_epub=Path(output_path),
+                crop_rects=crop_rects,
+            )
+            messagebox.showinfo("완료", f"변환이 완료됐습니다:\n{output_path}")
+        except Exception as e:
+            messagebox.showerror("변환 실패", str(e))
 
 
 def main() -> None:
