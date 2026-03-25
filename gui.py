@@ -77,6 +77,10 @@ class App(tk.Tk):
         self._thumb_buttons: list[tk.Button] = []
         self._ui_locked: bool = False
 
+        self._pulse_job: Optional[str] = None
+        self._pulse_value: int = 0
+        self._pulse_direction: int = 1
+
         self._build_ui()
         log.info("UI 빌드 완료")
         self._open_pdf()
@@ -179,14 +183,35 @@ class App(tk.Tk):
                   msg, value, maximum, indeterminate)
         self._status_label.config(text=msg)
         if indeterminate:
-            self._progress_bar.config(mode="indeterminate")
-            self._progress_bar.start(12)
+            self._start_pulse()
         else:
-            self._progress_bar.stop()
+            self._stop_pulse()
             self._progress_bar.config(mode="determinate",
                                        maximum=max(maximum, 1), value=value)
         # update_idletasks() 를 여기서 호출하면 ArrangePacking 이 누적된
         # 모든 위젯을 재배치해 O(n²) 레이아웃 폭발이 발생하므로 호출하지 않는다.
+
+    def _start_pulse(self) -> None:
+        """native indeterminate 대신 determinate 모드로 직접 펄스 애니메이션."""
+        if self._pulse_job is not None:
+            return  # 이미 실행 중
+        self._progress_bar.config(mode="determinate", maximum=100)
+        self._pulse_value = 0
+        self._pulse_direction = 1
+        self._step_pulse()
+
+    def _step_pulse(self) -> None:
+        self._pulse_value += 2
+        if self._pulse_value > 100:
+            self._pulse_value = 0
+        self._progress_bar.config(value=self._pulse_value)
+        self._pulse_job = self.after(20, self._step_pulse)
+
+    def _stop_pulse(self) -> None:
+        if self._pulse_job is not None:
+            self.after_cancel(self._pulse_job)
+            self._pulse_job = None
+        self._progress_bar.config(value=0)
 
     def _lock_ui(self, lock: bool) -> None:
         """변환/썸네일 생성 중 버튼을 비활성화한다."""
@@ -653,6 +678,48 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _ask_clipped_dialog(self, pages_str: str) -> bool:
+        """잘림 감지 다이얼로그 — True: Edit Area, False: Proceed."""
+        result: list[bool] = [False]
+        dlg = tk.Toplevel(self)
+        dlg.title("콘텐츠 잘림 감지")
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        tk.Label(
+            dlg,
+            text=(
+                f"{pages_str} 페이지에서 지정된 영역 밖으로 콘텐츠가 잘립니다.\n"
+                "영역을 수정하시겠습니까?\n\n"
+                "Edit Area → 첫 번째 문제 페이지로 이동\n"
+                "Proceed   → 현재 설정으로 그대로 변환"
+            ),
+            justify="left",
+            padx=20,
+            pady=16,
+            wraplength=420,
+        ).pack()
+
+        btn_frame = tk.Frame(dlg)
+        btn_frame.pack(pady=(0, 14))
+
+        def on_edit() -> None:
+            result[0] = True
+            dlg.destroy()
+
+        def on_proceed() -> None:
+            dlg.destroy()
+
+        tk.Button(btn_frame, text="Edit Area", width=12, command=on_edit).pack(
+            side="left", padx=8
+        )
+        tk.Button(btn_frame, text="Proceed", width=12, command=on_proceed).pack(
+            side="left", padx=8
+        )
+
+        dlg.wait_window()
+        return result[0]
+
     def _on_validation_done(self, clipped: list[int]) -> None:
         self._lock_ui(False)
         self._set_status("준비")
@@ -660,13 +727,7 @@ class App(tk.Tk):
         if clipped:
             pages_str = ", ".join(str(p) for p in clipped)
             log.warning("콘텐츠 잘림 감지: 페이지 %s", pages_str)
-            answer = messagebox.askyesno(
-                "콘텐츠 잘림 감지",
-                f"{pages_str} 페이지에서 지정된 영역 밖으로 콘텐츠가 잘립니다.\n"
-                "각 페이지로 이동해 영역을 조정하시겠습니까?\n\n"
-                "예 → 첫 번째 문제 페이지로 이동\n"
-                "아니오 → 현재 설정으로 그대로 변환",
-            )
+            answer = self._ask_clipped_dialog(pages_str)
             if answer:
                 self._guide_through_clipped(clipped)
                 return
