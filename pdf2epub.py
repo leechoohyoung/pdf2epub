@@ -131,8 +131,10 @@ def parse_pdf_metadata(pdf_path: Path) -> tuple[str, str]:
 def _markdown_to_html_body(md_text: str) -> str:
     """마크다운을 HTML body 내용으로 변환한다."""
     import re as _re
-    # 이미지 마크다운 제거 (![](...))
-    md_text = _re.sub(r'!\[[^\]]*\]\([^)]*\)', '', md_text)
+    # {n} 형태의 이미지 플레이스홀더를 마크다운 이미지 태그로 변환
+    # marker 는 마크다운에 {0}, {1} 식으로 남기기도 함
+    md_text = _re.sub(r'\{(\d+)\}', r'![Image \1](../images/image_\1.png)', md_text)
+
     # 테이블 셀 내 <br> → 공백
     md_text = _re.sub(r'<br\s*/?>', ' ', md_text, flags=_re.IGNORECASE)
 
@@ -198,6 +200,7 @@ def build_reflowable_opf(
     author: str,
     language: str,
     page_count: int,
+    image_names: list[str] | None = None,
 ) -> str:
     manifest_items = [
         '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
@@ -210,6 +213,12 @@ def build_reflowable_opf(
             f'<item id="{pid}" href="pages/{pid}.xhtml" media-type="application/xhtml+xml"/>'
         )
         spine_items.append(f'<itemref idref="{pid}"/>')
+
+    if image_names:
+        for idx, img_name in enumerate(image_names):
+            manifest_items.append(
+                f'<item id="img-{idx:04d}" href="images/{img_name}" media-type="image/png"/>'
+            )
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
@@ -237,6 +246,7 @@ def write_reflowable_epub(
     author: str,
     language: str,
     pages_md: list[str],
+    images: dict[str, any] | None = None,
 ) -> None:
     identifier = f"urn:uuid:{uuid.uuid4()}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -244,8 +254,21 @@ def write_reflowable_epub(
     css = """body { font-family: serif; line-height: 1.6; margin: 1em 2em; }
 h1, h2, h3 { margin-top: 1.2em; }
 p { margin: 0.6em 0; }
+img { max-width: 100%; height: auto; display: block; margin: 1em auto; }
 """
-    opf = build_reflowable_opf(identifier, title, author, language, len(pages_md))
+    # 이미지 파일명 리스트 구성 및 실제 저장 준비
+    image_save_tasks: list[tuple[str, any]] = []
+    image_names: list[str] = []
+    if images:
+        import re
+        for key, img_data in images.items():
+            match = re.search(r'(\d+)', key)
+            idx = match.group(1) if match else key
+            img_name = f"image_{idx}.png"
+            image_names.append(img_name)
+            image_save_tasks.append((img_name, img_data))
+
+    opf = build_reflowable_opf(identifier, title, author, language, len(pages_md), image_names)
     nav_xhtml = build_nav_document(title)
 
     with zipfile.ZipFile(output_path, "w") as epub:
@@ -263,6 +286,18 @@ p { margin: 0.6em 0; }
         epub.writestr("OEBPS/styles/reflowable.css", css)
         epub.writestr("OEBPS/nav.xhtml", nav_xhtml)
         epub.writestr("OEBPS/content.opf", opf)
+
+        # 이미지 저장
+        if image_save_tasks:
+            import io
+            from PIL import Image
+            for img_name, img_data in image_save_tasks:
+                img_bytes = io.BytesIO()
+                if hasattr(img_data, "save"): # PIL Image
+                    img_data.save(img_bytes, format="PNG")
+                else:
+                    img_bytes.write(img_data)
+                epub.writestr(f"OEBPS/images/{img_name}", img_bytes.getvalue())
 
         for i, md_text in enumerate(pages_md):
             page_number = i + 1
@@ -297,10 +332,10 @@ def convert_pdf_to_epub_text_mode(
         logger.info("텍스트 모드 변환 시작: %s → %s", input_pdf, output_epub)
 
     models = load_models()
-    pages_md = extract_pages_markdown(input_pdf, models, crop_rects=crop_rects)
+    pages_md, images = extract_pages_markdown(input_pdf, models, crop_rects=crop_rects)
 
     if logger:
-        logger.info("%d 페이지 마크다운 추출 완료, EPUB 빌드 중...", len(pages_md))
+        logger.info("%d 페이지 마크다운 추출 완료 (%d 이미지), EPUB 빌드 중...", len(pages_md), len(images))
 
     write_reflowable_epub(
         output_path=output_epub,
@@ -308,6 +343,7 @@ def convert_pdf_to_epub_text_mode(
         author=author,
         language=language,
         pages_md=pages_md,
+        images=images,
     )
 
     if logger:

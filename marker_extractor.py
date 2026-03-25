@@ -42,27 +42,27 @@ def extract_pages_markdown(
     pdf_path: Path,
     models: dict,
     crop_rects: dict[int, Rect | None] | None = None,
-) -> list[str]:
-    """PDF 를 marker 로 변환하고 페이지별 마크다운 목록을 반환한다.
+) -> tuple[list[str], dict[str, Any]]:
+    """PDF 를 marker 로 변환하고 (페이지별 마크다운 목록, 이미지 딕셔너리)를 반환한다.
 
     crop_rects 가 주어지면, 크롭 영역 밖 텍스트를 마크다운에서 제거한다.
     """
     log.info("marker 변환 시작: %s", pdf_path)
 
-    full_markdown = _run_marker(pdf_path, models)
+    full_markdown, images = _run_marker(pdf_path, models)
     pages = _split_into_pages(full_markdown)
 
-    log.info("marker 변환 완료: %d 페이지 분리됨", len(pages))
+    log.info("marker 변환 완료: %d 페이지 분리됨, %d 이미지 추출됨", len(pages), len(images))
 
     if crop_rects:
         pages = _filter_by_crop(pdf_path, pages, crop_rects)
 
-    return pages
+    return pages, images
 
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────────
 
-def _run_marker(pdf_path: Path, models: dict) -> str:
+def _run_marker(pdf_path: Path, models: dict) -> tuple[str, dict[str, Any]]:
     from marker.config.parser import ConfigParser      # type: ignore[import]
     from marker.converters.pdf import PdfConverter     # type: ignore[import]
 
@@ -74,7 +74,7 @@ def _run_marker(pdf_path: Path, models: dict) -> str:
         renderer=config_parser.get_renderer(),
     )
     rendered = converter(str(pdf_path))
-    return rendered.markdown
+    return rendered.markdown, rendered.images
 
 
 def _split_into_pages(full_text: str) -> list[str]:
