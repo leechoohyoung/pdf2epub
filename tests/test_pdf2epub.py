@@ -110,6 +110,27 @@ class Pdf2EpubTests(unittest.TestCase):
         self.assertNotIn("mutool", module.REQUIRED_COMMANDS)
         self.assertIn("pdfinfo", module.REQUIRED_COMMANDS)
 
+    def test_render_page_to_png_respects_explicit_crop_rect(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            pdf_path = temp_path / "test.pdf"
+            with fitz.open() as doc:
+                page = doc.new_page(width=400, height=600)
+                page.insert_text((50, 100), "Hello", fontsize=12)
+                page.insert_text((300, 500), "Outside", fontsize=12)
+                doc.save(str(pdf_path))
+
+            png_path = temp_path / "out.png"
+            # 크롭 영역을 좁게 지정해 "Outside" 텍스트가 잘리도록
+            w, h = module.render_page_to_png(
+                pdf_path, 1, 72, png_path,
+                crop_rect=(0, 0, 200, 300),
+            )
+            self.assertTrue(png_path.exists())
+            # 크롭된 결과이므로 전체 페이지보다 작아야 함
+            self.assertLess(w, 400)
+
 
 if __name__ == "__main__":
     unittest.main()

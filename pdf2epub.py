@@ -84,10 +84,20 @@ def get_content_bbox(page: fitz.Page) -> fitz.Rect:
     return bbox & page.rect
 
 
-def render_page_to_png(pdf_path: Path, page_number: int, dpi: int, output_path: Path) -> tuple[int, int]:
+def render_page_to_png(
+    pdf_path: Path,
+    page_number: int,
+    dpi: int,
+    output_path: Path,
+    *,
+    crop_rect: tuple[float, float, float, float] | None = None,
+) -> tuple[int, int]:
     with fitz.open(str(pdf_path)) as doc:
         page = doc[page_number - 1]
-        clip = get_content_bbox(page)
+        if crop_rect is not None:
+            clip = fitz.Rect(crop_rect)
+        else:
+            clip = get_content_bbox(page)
         mat = fitz.Matrix(dpi / 72, dpi / 72)
         pixmap = page.get_pixmap(matrix=mat, clip=clip)
         pixmap.save(str(output_path))
@@ -249,6 +259,7 @@ def convert_pdf_to_epub(
     language: str = "ko",
     keep_temp: bool = False,
     logger: logging.Logger | None = None,
+    crop_rects: dict[int, tuple[float, float, float, float]] | None = None,
 ) -> None:
     require_commands(REQUIRED_COMMANDS)
 
@@ -285,7 +296,11 @@ def convert_pdf_to_epub(
                 png_path = image_dir / f"page-{page_number:04d}.png"
 
                 try:
-                    width, height = render_page_to_png(input_pdf, page_number, dpi, png_path)
+                    explicit_crop = crop_rects.get(page_number) if crop_rects else None
+                    width, height = render_page_to_png(
+                        input_pdf, page_number, dpi, png_path,
+                        crop_rect=explicit_crop,
+                    )
                 except Exception:
                     if logger is not None:
                         logger.exception("Failed while processing page %s/%s", page_number, page_count)
