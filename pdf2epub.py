@@ -336,7 +336,7 @@ blockquote { border-left: 4px solid #ddd; padding-left: 1em; color: #666; font-s
         identifier, title, author, language, len(pages_md), 
         image_names, cover_image_name=actual_cover_name
     )
-    nav_xhtml = build_nav_document(title)
+    nav_xhtml = build_nav_document(title, pages_md=pages_md)
 
     with zipfile.ZipFile(output_path, "w") as epub:
         epub.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
@@ -467,7 +467,43 @@ def convert_pdf_to_epub_text_mode(
         logger.info("텍스트 모드 변환 완료: %s", output_epub)
 
 
-def build_nav_document(title: str) -> str:
+def build_nav_document(title: str, pages_md: list[str] | None = None, page_count: int | None = None) -> str:
+    toc_items = []
+    
+    if pages_md:
+        # Reflowable(Text) Mode: Parse Markdown for headings
+        for i, md_text in enumerate(pages_md):
+            page_number = i + 1
+            page_id = f"page-{page_number:04d}.xhtml"
+            
+            # Use regex to find markdown headings (e.g. # Heading)
+            import re
+            lines = md_text.splitlines()
+            for line in lines:
+                match = re.match(r'^(#{1,6})\s+(.*)$', line.strip())
+                if match:
+                    level = len(match.group(1))
+                    text = html.escape(match.group(2).strip())
+                    
+                    # For simplicity, flattening to <li> instead of deeply nested lists
+                    # To add indent visually, we could use CSS classes or style
+                    indent = (level - 1) * 20
+                    toc_items.append(f'      <li style="margin-left: {indent}px"><a href="pages/{page_id}">{text}</a></li>')
+                    
+        if not toc_items:
+            # Fallback if no headings found
+             for i in range(1, len(pages_md) + 1):
+                page_id = f"page-{i:04d}.xhtml"
+                toc_items.append(f'      <li><a href="pages/{page_id}">Page {i}</a></li>')
+
+    elif page_count:
+        # Fixed-Layout Mode: Simple list of pages
+        for i in range(1, page_count + 1):
+            page_id = f"page-{i:04d}.xhtml"
+            toc_items.append(f'      <li><a href="pages/{page_id}">Page {i}</a></li>')
+            
+    toc_html = "\n".join(toc_items)
+    
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="ko">
@@ -476,7 +512,10 @@ def build_nav_document(title: str) -> str:
 </head>
 <body>
   <nav epub:type="toc" id="toc">
-    <ol/>
+    <h1>목차</h1>
+    <ol>
+{toc_html}
+    </ol>
   </nav>
 </body>
 </html>
@@ -566,7 +605,7 @@ img { display: block; width: 100%; height: 100%; }
 """
 
     opf = build_opf_document(identifier, title, author, language, pages)
-    nav_xhtml = build_nav_document(title)
+    nav_xhtml = build_nav_document(title, page_count=len(pages))
 
     with zipfile.ZipFile(output_path, "w") as epub:
         epub.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
