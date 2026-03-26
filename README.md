@@ -18,13 +18,21 @@ PDF2EPUB is a powerful, GUI-based conversion tool designed to transform PDF docu
 *   **Cover Page Selection:** Choose any page from the PDF to set as the official EPUB cover image.
 *   **Validation:** Automatically detects if your chosen crop areas cut off vital content.
 
-## 🚀 Installation
+## 🚀 Installation & Environment
 
+### Tested Environment
+*   **OS:** macOS Sonoma (Apple Silicon - M Series) / Linux / Windows 11
+*   **Python:** 3.9+ (Tested on Python 3.14.0)
+*   **GUI Framework:** Tkinter (Built-in standard library)
+*   **Core Libraries:** PyMuPDF (`fitz`), marker-pdf, Pillow, markdown, markdown2
+
+### Setup
 1. Clone the repository.
 2. Install the required Python packages:
    ```bash
    pip install -r requirements.txt
    ```
+   *(Note: The GUI attempts to bootstrap missing core dependencies automatically on first run).*
 
 ## 📖 Usage
 
@@ -60,13 +68,22 @@ PDF2EPUB은 PDF 문서를 가독성이 높은 EPUB 파일로 변환해주는 강
 *   **표지 지정 기능:** PDF의 어떤 페이지든 공식 EPUB 표지로 지정할 수 있습니다.
 *   **콘텐츠 잘림 검증:** 설정한 영역이 중요한 콘텐츠를 잘라내는지 자동으로 감지하여 경고합니다.
 
-## 🚀 설치 방법
+## 🚀 개발 및 실행 환경
+
+이 프로젝트는 다음 환경에서 개발 및 테스트되었습니다:
+*   **OS:** macOS Sonoma (Apple Silicon) / Linux / Windows 11 호환
+*   **Python:** 3.9+ (Python 3.14.0 환경에서 테스트 됨)
+*   **GUI 프레임워크:** Tkinter (파이썬 기본 내장)
+*   **핵심 라이브러리:** PyMuPDF (`fitz`), marker-pdf, Pillow, markdown, markdown2 등
+
+### 설치 방법
 
 1. 저장소를 클론합니다.
 2. 필수 패키지를 설치합니다:
    ```bash
    pip install -r requirements.txt
    ```
+   *(참고: GUI를 처음 실행하면 필수로 필요한 핵심 라이브러리 설치를 자동으로 시도합니다).*
 
 ## 📖 사용 방법
 
