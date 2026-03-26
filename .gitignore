@@ -71,3 +71,4 @@ htmlcov/
 # pyenv
 # .python-version
 *.log
+__pycache__/*
