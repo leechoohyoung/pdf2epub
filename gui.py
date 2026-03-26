@@ -191,6 +191,7 @@ class App(tk.Tk):
         self._pulse_direction: int = 1
 
         self._var_text_mode = tk.BooleanVar(value=True)
+        self._var_debug_mode = tk.BooleanVar(value=False)
         self._var_log_visible = tk.BooleanVar(value=False)
         self._log_panel_visible: bool = False
 
@@ -218,6 +219,10 @@ class App(tk.Tk):
         options_menu.add_checkbutton(
             label=_t("menu_text_mode"),
             variable=self._var_text_mode,
+        )
+        options_menu.add_checkbutton(
+            label=_t("menu_debug_mode"),
+            variable=self._var_debug_mode,
         )
         options_menu.add_checkbutton(
             label=_t("menu_show_log"),
@@ -1042,6 +1047,7 @@ class App(tk.Tk):
             return
 
         use_text_mode = self._var_text_mode.get()
+        debug_mode = self._var_debug_mode.get()
         log.info(_t("log_convert_start", input=self._pdf_path.name, output=Path(output_path).name, mode=str(use_text_mode)))
         self._lock_ui(True)
         
@@ -1085,7 +1091,8 @@ class App(tk.Tk):
                         progress_callback=lambda cur, tot: self.after(
                             0, lambda: self._set_status(f"{_t('status_converting')} ({cur}/{tot})", cur, tot)
                         ),
-                        cover_page=self._cover_page
+                        cover_page=self._cover_page,
+                        debug_mode=debug_mode
                     )
                 else:
                     module.convert_pdf_to_epub(

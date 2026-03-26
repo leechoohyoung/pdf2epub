@@ -414,6 +414,7 @@ def convert_pdf_to_epub_text_mode(
     crop_rects: dict[int, tuple[float, float, float, float] | None] | None = None,
     progress_callback: any | None = None,
     cover_page: int = 1,
+    debug_mode: bool = False,
 ) -> None:
     """Convert PDF to reflowable EPUB using marker page-by-page."""
     from marker_extractor import load_models, extract_pages_markdown  # type: ignore[import]
@@ -447,7 +448,8 @@ def convert_pdf_to_epub_text_mode(
         models = load_models()
         pages_md, images = extract_pages_markdown(
             input_pdf, models, crop_rects=crop_rects,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            debug_mode=debug_mode
         )
 
         if logger:

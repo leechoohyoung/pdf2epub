@@ -40,6 +40,7 @@ def extract_pages_markdown(
     models: dict,
     crop_rects: dict[int, Rect | None] | None = None,
     progress_callback: Any | None = None,
+    debug_mode: bool = False,
 ) -> tuple[list[str], dict[str, Any]]:
     """Convert PDF to markdown page by page using marker."""
     log.info(_t("log_marker_start", path=pdf_path))
@@ -62,6 +63,13 @@ def extract_pages_markdown(
     import tempfile
     import os
 
+    # 디버깅 모드일 경우 폴더 생성
+    debug_dir = None
+    if debug_mode:
+        debug_dir = pdf_path.parent / f"{pdf_path.stem}_debug_pages"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        log.info("디버깅 모드 활성화 - 중간 파일 저장 경로: %s", debug_dir)
+
     with fitz.open(str(pdf_path)) as doc:
         total = len(doc)
         for i in range(total):
@@ -78,10 +86,19 @@ def extract_pages_markdown(
             rect = crop_rects.get(page_num) if crop_rects else None
             if rect:
                 # GUI의 상대 좌표를 PDF의 물리적 절대 좌표로 보정 (오프셋 더하기)
-                # 원본 PDF 페이지에 이미 CropBox(여백)가 적용되어 있을 수 있으므로,
-                # GUI의 (0,0) 기준 좌표에 원본 페이지의 실제 CropBox 원점을 더해주어야 한다.
-                # 주의: page.rect의 원점은 항상 0,0으로 정규화되므로 page.cropbox 원점을 사용한다.
                 offset_rect = fitz.Rect(rect) + (page.cropbox.x0, page.cropbox.y0, page.cropbox.x0, page.cropbox.y0)
+                
+                # 디버깅용 가이드 이미지 생성 (영역 보정 확인용)
+                if debug_mode and debug_dir:
+                    mat = fitz.Matrix(150 / 72, 150 / 72)
+                    guide_doc = fitz.open()
+                    guide_page = guide_doc.new_page(width=page.rect.width, height=page.rect.height)
+                    guide_page.show_pdf_page(guide_page.rect, temp_doc, 0)
+                    guide_page.draw_rect(fitz.Rect(rect), color=(1, 0, 0), width=2)
+                    guide_pix = guide_page.get_pixmap(matrix=mat)
+                    guide_pix.save(str(debug_dir / f"page_{page_num:04d}_guide.png"))
+                    guide_doc.close()
+
                 # 실제 변환용 PDF에는 보정된 절대 좌표로 크롭 적용
                 page.set_cropbox(offset_rect)
             
@@ -90,6 +107,13 @@ def extract_pages_markdown(
             os.close(fd)
             try:
                 temp_doc.save(temp_path)
+                
+                # 디버깅 모드일 경우 크롭된 PDF 별도 저장
+                if debug_mode and debug_dir:
+                    debug_pdf_path = debug_dir / f"page_{page_num:04d}_cropped.pdf"
+                    import shutil
+                    shutil.copy(temp_path, debug_pdf_path)
+
                 temp_doc.close()
 
                 # 2. marker 실행
@@ -101,12 +125,11 @@ def extract_pages_markdown(
                     md_text = rendered.markdown.strip()
                     all_pages_md.append(md_text)
                     
-                    # 이미지 수집 (이름 충돌 방지를 위해 페이지 번호 접두어 추가)
+                    # 이미지 수집
                     for img_key, img_data in rendered.images.items():
                         safe_key = f"p{page_num}_{img_key}"
                         all_images[safe_key] = img_data
                         
-                        # 마크다운 본문 내의 이미지 경로도 safe_key 로 업데이트 필요
                         import re
                         pattern = re.escape(img_key)
                         all_pages_md[-1] = re.sub(rf'(!\[.*?\]\()({pattern})(\))', rf'\1{safe_key}\3', all_pages_md[-1])
@@ -118,6 +141,9 @@ def extract_pages_markdown(
             finally:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
+
+    log.info("marker 페이지별 변환 완료: %d 페이지, %d 이미지", len(all_pages_md), len(all_images))
+    return all_pages_md, all_images
 
     log.info("marker 페이지별 변환 완료: %d 페이지, %d 이미지", len(all_pages_md), len(all_images))
     return all_pages_md, all_images
