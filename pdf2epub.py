@@ -131,16 +131,74 @@ def parse_pdf_metadata(pdf_path: Path) -> tuple[str, str]:
 def _markdown_to_html_body(md_text: str) -> str:
     """마크다운을 HTML body 내용으로 변환한다."""
     import re as _re
-    # {n} 형태의 이미지 플레이스홀더를 마크다운 이미지 태그로 변환
-    # marker 는 마크다운에 {0}, {1} 식으로 남기기도 함
-    md_text = _re.sub(r'\{(\d+)\}', r'![Image \1](../images/image_\1.png)', md_text)
+    
+    def _sanitize_filename(filename: str) -> str:
+        # 파일명에서 공백 및 위험한 문자를 언더스코어로 변경
+        return _re.sub(r'[\s/\\\:\*\?\"\<\>\|]', '_', filename)
+
+    # marker 가 내보내는 이미지 경로를 EPUB 구조에 맞게 수정
+    # 1. 마크다운: ![alt](filename) -> ![alt](../images/safe_filename)
+    def _fix_md_img(match):
+        alt = match.group(1)
+        src = match.group(2).strip()
+        if src.startswith(('http://', 'https://', 'data:')):
+            return match.group(0)
+        return f'![{alt}](../images/{_sanitize_filename(src)})'
+    
+    md_text = _re.sub(r'!\[([^\]]*)\]\(([^)]+)\)', _fix_md_img, md_text)
+    
+    # 2. HTML: <img src="filename"> -> <img src="../images/safe_filename">
+    def _fix_html_img(match):
+        prefix = match.group(1)
+        src = match.group(2).strip()
+        if src.startswith(('http://', 'https://', 'data:')):
+            return match.group(0)
+        return f'<img {prefix}src="../images/{_sanitize_filename(src)}"'
+
+    md_text = _re.sub(r'<img\s+([^>]*?)src=["\']([^"\']+)["\']', _fix_html_img, md_text)
 
     # 테이블 셀 내 <br> → 공백
     md_text = _re.sub(r'<br\s*/?>', ' ', md_text, flags=_re.IGNORECASE)
 
+    # 마스킹(Redaction)으로 인해 부자연스럽게 끊어진 문장 이어주기 (한국어/영어 휴리스틱)
+    # 단, 마크다운 문법(제목, 목록, 인용구, 표 등)을 해치지 않도록 주의
+    def _join_broken_lines(text: str) -> str:
+        lines = text.split('\n')
+        joined_lines = []
+        for i, line in enumerate(lines):
+            stripped = line.rstrip()
+            if not stripped:
+                joined_lines.append('')
+                continue
+            
+            # 다음 줄이 있고, 현재 줄이 마크다운 특수 기호나 마침표로 끝나지 않으며,
+            # 다음 줄도 일반 텍스트로 시작하는 경우 문장 이어주기 시도
+            is_normal_text_end = not _re.search(r'[.?!:;]$', stripped) and not stripped.endswith('|')
+            is_not_md_block = not _re.match(r'^(#|\*|-|>|\d+\.|\||```)', line.lstrip())
+            
+            if i + 1 < len(lines):
+                next_line = lines[i+1].lstrip()
+                next_is_normal = next_line and not _re.match(r'^(#|\*|-|>|\d+\.|\||```)', next_line)
+                
+                if is_normal_text_end and is_not_md_block and next_is_normal:
+                    # 한국어의 경우 띄어쓰기 없이 붙이거나 공백 하나로 붙임
+                    # 끝 글자가 한글이고 다음 첫 글자도 한글이면 띄어쓰기로 연결
+                    joined_lines.append(stripped + ' ')
+                    continue
+            
+            joined_lines.append(line)
+        
+        # ' \n' 형태로 임시 연결된 줄들을 완전히 합침
+        return ''.join(joined_lines).replace(' \n', ' ').replace('\n\n', '\n\n\n').replace('\n\n\n\n', '\n\n')
+
+    md_text = _join_broken_lines(md_text)
+
     try:
         import markdown2  # type: ignore[import]
-        return markdown2.markdown(md_text, extras=["tables", "fenced-code-blocks"])
+        # 표, 코드블록, 각주 등 지원 강화
+        return markdown2.markdown(md_text, extras=[
+            "tables", "fenced-code-blocks", "footnotes", "break-on-newline", "header-ids"
+        ])
     except ImportError:
         pass
     try:
@@ -216,8 +274,10 @@ def build_reflowable_opf(
 
     if image_names:
         for idx, img_name in enumerate(image_names):
+            ext = img_name.split('.')[-1].lower()
+            media_type = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
             manifest_items.append(
-                f'<item id="img-{idx:04d}" href="images/{img_name}" media-type="image/png"/>'
+                f'<item id="img-{idx:04d}" href="images/{img_name}" media-type="{media_type}"/>'
             )
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -251,20 +311,25 @@ def write_reflowable_epub(
     identifier = f"urn:uuid:{uuid.uuid4()}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    css = """body { font-family: serif; line-height: 1.6; margin: 1em 2em; }
-h1, h2, h3 { margin-top: 1.2em; }
-p { margin: 0.6em 0; }
-img { max-width: 100%; height: auto; display: block; margin: 1em auto; }
+    css = """body { font-family: serif; line-height: 1.6; margin: 0.5em 1em; color: #333; }
+h1, h2, h3, h4 { color: #111; margin-top: 1.2em; margin-bottom: 0.5em; line-height: 1.2; }
+p { margin: 0.6em 0; text-align: justify; word-break: break-all; }
+img { max-width: 100%; height: auto; display: block; margin: 1em auto; border-radius: 4px; }
+table { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: 0.9em; table-layout: auto; }
+th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; word-break: break-all; }
+th { background-color: #f5f5f5; font-weight: bold; }
+pre, code { font-family: monospace; background-color: #f8f8f8; padding: 2px 4px; border-radius: 3px; }
+pre { padding: 10px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }
+blockquote { border-left: 4px solid #ddd; padding-left: 1em; color: #666; font-style: italic; }
 """
     # 이미지 파일명 리스트 구성 및 실제 저장 준비
     image_save_tasks: list[tuple[str, any]] = []
     image_names: list[str] = []
     if images:
-        import re
+        import re as _re
         for key, img_data in images.items():
-            match = re.search(r'(\d+)', key)
-            idx = match.group(1) if match else key
-            img_name = f"image_{idx}.png"
+            # _markdown_to_html_body 의 _sanitize_filename 과 동일한 규칙 적용
+            img_name = _re.sub(r'[\s/\\\:\*\?\"\<\>\|]', '_', key)
             image_names.append(img_name)
             image_save_tasks.append((img_name, img_data))
 
@@ -294,7 +359,12 @@ img { max-width: 100%; height: auto; display: block; margin: 1em auto; }
             for img_name, img_data in image_save_tasks:
                 img_bytes = io.BytesIO()
                 if hasattr(img_data, "save"): # PIL Image
-                    img_data.save(img_bytes, format="PNG")
+                    ext = img_name.split('.')[-1].lower()
+                    img_format = "JPEG" if ext in ("jpg", "jpeg") else "PNG"
+                    # RGB 모드로 변환 (JPEG 저장 시 투명도 오류 방지)
+                    if img_format == "JPEG" and img_data.mode in ("RGBA", "P"):
+                        img_data = img_data.convert("RGB")
+                    img_data.save(img_bytes, format=img_format)
                 else:
                     img_bytes.write(img_data)
                 epub.writestr(f"OEBPS/images/{img_name}", img_bytes.getvalue())
@@ -304,6 +374,26 @@ img { max-width: 100%; height: auto; display: block; margin: 1em auto; }
             page_id = f"page-{page_number:04d}"
             spine_title = f"{title} - Page {page_number}"
             html_body = _markdown_to_html_body(md_text)
+            
+            # marker가 마크다운 본문에 이미지 태그를 누락시킨 경우를 대비하여
+            # 현재 페이지 번호(p{N}_)가 포함된 이미지들을 찾아 하단에 렌더링
+            import re as _re
+            page_images_html = []
+            prefix = f"p{page_number}_"
+            if image_names:
+                for img_name in image_names:
+                    if img_name.startswith(prefix):
+                        # 이미 본문에 삽입된 이미지가 아닐 경우에만 추가
+                        if f'src="../images/{img_name}"' not in html_body:
+                            page_images_html.append(
+                                f'<figure style="text-align: center; margin: 1.5em 0;">\n'
+                                f'  <img src="../images/{img_name}" alt="Page {page_number} Image" style="max-width: 100%; height: auto; border-radius: 4px;"/>\n'
+                                f'</figure>'
+                            )
+            
+            if page_images_html:
+                html_body += "\n" + "\n".join(page_images_html)
+
             epub.writestr(
                 f"OEBPS/pages/{page_id}.xhtml",
                 build_chapter_xhtml(page_number, spine_title, html_body),
@@ -317,8 +407,9 @@ def convert_pdf_to_epub_text_mode(
     language: str = "ko",
     logger: logging.Logger | None = None,
     crop_rects: dict[int, tuple[float, float, float, float] | None] | None = None,
+    progress_callback: any | None = None,
 ) -> None:
-    """marker 를 사용해 텍스트 기반 리플로우 EPUB 을 생성한다."""
+    """marker 를 사용해 페이지별로 개별 변환하여 리플로우 EPUB 을 생성한다."""
     from marker_extractor import load_models, extract_pages_markdown  # type: ignore[import]
 
     if not input_pdf.exists():
@@ -329,13 +420,16 @@ def convert_pdf_to_epub_text_mode(
     author = pdf_author or "Unknown"
 
     if logger:
-        logger.info("텍스트 모드 변환 시작: %s → %s", input_pdf, output_epub)
+        logger.info("텍스트 모드 개별 변환 시작: %s → %s", input_pdf, output_epub)
 
     models = load_models()
-    pages_md, images = extract_pages_markdown(input_pdf, models, crop_rects=crop_rects)
+    pages_md, images = extract_pages_markdown(
+        input_pdf, models, crop_rects=crop_rects,
+        progress_callback=progress_callback
+    )
 
     if logger:
-        logger.info("%d 페이지 마크다운 추출 완료 (%d 이미지), EPUB 빌드 중...", len(pages_md), len(images))
+        logger.info("%d 페이지 개별 변환 완료 (%d 이미지), EPUB 빌드 중...", len(pages_md), len(images))
 
     write_reflowable_epub(
         output_path=output_epub,

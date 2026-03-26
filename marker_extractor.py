@@ -42,22 +42,87 @@ def extract_pages_markdown(
     pdf_path: Path,
     models: dict,
     crop_rects: dict[int, Rect | None] | None = None,
+    progress_callback: Any | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
-    """PDF 를 marker 로 변환하고 (페이지별 마크다운 목록, 이미지 딕셔너리)를 반환한다.
+    """PDF 를 페이지별로 분리하여 개별적으로 marker 로 변환한다.
 
-    crop_rects 가 주어지면, 크롭 영역 밖 텍스트를 마크다운에서 제거한다.
+    각 페이지를 1페이지짜리 독립 PDF로 만들어 변환함으로써 레이아웃 간섭을 원천 차단한다.
     """
-    log.info("marker 변환 시작: %s", pdf_path)
+    log.info("marker 페이지별 개별 변환 시작: %s", pdf_path)
 
-    full_markdown, images = _run_marker(pdf_path, models)
-    pages = _split_into_pages(full_markdown)
+    from marker.config.parser import ConfigParser      # type: ignore[import]
+    from marker.converters.pdf import PdfConverter     # type: ignore[import]
 
-    log.info("marker 변환 완료: %d 페이지 분리됨, %d 이미지 추출됨", len(pages), len(images))
+    # 모델 설정 및 컨버터 초기화 (루프 밖에서 한 번만)
+    config_parser = ConfigParser({"output_format": "markdown", "paginate_output": False})
+    converter = PdfConverter(
+        config=config_parser.generate_config_dict(),
+        artifact_dict=models,
+        processor_list=config_parser.get_processors(),
+        renderer=config_parser.get_renderer(),
+    )
 
-    if crop_rects:
-        pages = _filter_by_crop(pdf_path, pages, crop_rects)
+    all_pages_md: list[str] = []
+    all_images: dict[str, Any] = {}
 
-    return pages, images
+    import tempfile
+    import os
+
+    with fitz.open(str(pdf_path)) as doc:
+        total = len(doc)
+        for i in range(total):
+            page_num = i + 1
+            if progress_callback:
+                progress_callback(page_num, total)
+
+            # 1. 해당 페이지만 추출하여 임시 PDF 생성
+            temp_doc = fitz.open()
+            temp_doc.insert_pdf(doc, from_page=i, to_page=i)
+            
+            # 크롭 영역 적용 (있을 경우)
+            rect = crop_rects.get(page_num) if crop_rects else None
+            if rect:
+                page = temp_doc[0]
+                page.set_cropbox(fitz.Rect(rect))
+            
+            fd, temp_pdf_path = tempfile.mkstemp(suffix=".pdf")
+            os.close(fd)
+            temp_pdf = Path(temp_pdf_path)
+            temp_doc.save(str(temp_pdf))
+            temp_doc.close()
+
+            # 2. marker 실행
+            try:
+                log.debug("페이지 %d/%d 변환 중...", page_num, total)
+                rendered = converter(str(temp_pdf))
+                
+                # 마크다운 저장
+                md_text = rendered.markdown.strip()
+                all_pages_md.append(md_text)
+                
+                # 이미지 수집 (이름 충돌 방지를 위해 페이지 번호 접두어 추가)
+                for img_key, img_data in rendered.images.items():
+                    safe_key = f"p{page_num}_{img_key}"
+                    all_images[safe_key] = img_data
+                    
+                    # 마크다운 본문 내의 이미지 경로도 safe_key 로 업데이트 필요
+                    # (이후 pdf2epub.py 의 _markdown_to_html_body 에서 처리하도록 safe_key 정보를 본문에 남김)
+                    # marker가 뱉은 이미지명을 본문에서 찾아 pN_ 접두어를 붙여줌
+                    import re
+                    # ![alt](img_key) 또는 <img src="img_key"> 찾기
+                    pattern = re.escape(img_key)
+                    all_pages_md[-1] = re.sub(rf'(!\[.*?\]\()({pattern})(\))', rf'\1{safe_key}\3', all_pages_md[-1])
+                    all_pages_md[-1] = re.sub(rf'(<img.*?src=["\'])({pattern})(["\'])', rf'\1{safe_key}\3', all_pages_md[-1])
+
+            except Exception as e:
+                log.error("페이지 %d 변환 실패: %s", page_num, e)
+                all_pages_md.append(f"> [오류] 페이지 {page_num} 변환에 실패했습니다.")
+            finally:
+                if temp_pdf.exists():
+                    temp_pdf.unlink()
+
+    log.info("marker 페이지별 변환 완료: %d 페이지, %d 이미지", len(all_pages_md), len(all_images))
+    return all_pages_md, all_images
 
 
 # ── 내부 헬퍼 ─────────────────────────────────────────────────────────────────
@@ -84,52 +149,3 @@ def _split_into_pages(full_text: str) -> list[str]:
     parts = re.split(rf"\n*{sep}\n*", full_text)
     result = [p.strip() for p in parts if p.strip()]
     return result if result else [full_text.strip()]
-
-
-def _filter_by_crop(
-    pdf_path: Path,
-    pages: list[str],
-    crop_rects: dict[int, Rect | None],
-) -> list[str]:
-    """크롭 영역 밖 텍스트 span 을 각 페이지 마크다운에서 제거한다."""
-    filtered: list[str] = []
-
-    with fitz.open(str(pdf_path)) as doc:
-        for i, md_text in enumerate(pages):
-            page_number = i + 1
-            rect = crop_rects.get(page_number)
-            if rect is None or page_number > len(doc):
-                filtered.append(md_text)
-                continue
-
-            crop = fitz.Rect(rect)
-            outside_texts: set[str] = set()
-            page = doc[page_number - 1]
-            for block in page.get_text("dict")["blocks"]:
-                if block.get("type") != 0:
-                    continue
-                for line in block.get("lines", []):
-                    for span in line.get("spans", []):
-                        bbox = fitz.Rect(span["bbox"])
-                        if not bbox.is_empty and not crop.contains(bbox):
-                            t = span["text"].strip()
-                            if t:
-                                outside_texts.add(t)
-
-            if not outside_texts:
-                filtered.append(md_text)
-                continue
-
-            kept: list[str] = []
-            for line in md_text.splitlines():
-                clean = line.strip()
-                if any(ot in clean for ot in outside_texts):
-                    log.debug("크롭 밖 제거 (p%d): %.60s", page_number, clean)
-                    continue
-                kept.append(line)
-
-            filtered.append("\n".join(kept).strip())
-            log.info("p%d: %d 개 outside span 기준 필터링 완료",
-                     page_number, len(outside_texts))
-
-    return filtered
