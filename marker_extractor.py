@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import fitz
+from i18n import _t
 
 log = logging.getLogger("pdf2epub.marker_extractor")
 
@@ -31,10 +32,10 @@ def load_models() -> dict:
     global _models
     if _models is not None:
         return _models
-    log.info("marker 모델 로딩 중 (최초 실행 시 다운로드 발생)...")
+    log.info("Loading marker models (download may occur on first run)...")
     from marker.models import create_model_dict  # type: ignore[import]
     _models = create_model_dict()
-    log.info("marker 모델 로딩 완료")
+    log.info("Marker models loaded successfully")
     return _models
 
 
@@ -44,11 +45,8 @@ def extract_pages_markdown(
     crop_rects: dict[int, Rect | None] | None = None,
     progress_callback: Any | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
-    """PDF 를 페이지별로 분리하여 개별적으로 marker 로 변환한다.
-
-    각 페이지를 1페이지짜리 독립 PDF로 만들어 변환함으로써 레이아웃 간섭을 원천 차단한다.
-    """
-    log.info("marker 페이지별 개별 변환 시작: %s", pdf_path)
+    """Convert PDF to markdown page by page using marker."""
+    log.info(_t("log_marker_start", path=pdf_path))
 
     from marker.config.parser import ConfigParser      # type: ignore[import]
     from marker.converters.pdf import PdfConverter     # type: ignore[import]

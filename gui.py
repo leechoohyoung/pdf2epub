@@ -42,6 +42,7 @@ import tkinter as tk
 
 import fitz
 
+from i18n import _t
 from crop_store import CropStore
 from validator import Validator
 
@@ -59,7 +60,7 @@ logging.basicConfig(
     ],
 )
 log = logging.getLogger("pdf2epub.gui")
-log.info("GUI 시작. 로그 파일: %s", _LOG_PATH)
+log.info(_t("log_start", path=_LOG_PATH))
 
 
 # ── 상수 ─────────────────────────────────────────────────────────────────────
@@ -107,10 +108,7 @@ class _GUILogHandler(logging.Handler):
 
 
 class _TqdmRouter:
-    """sys.stderr 를 가로채 tqdm 출력을 파싱해 상태/진행률 콜백으로 라우팅한다.
-
-    tqdm 줄 예: "Recognizing Layout:  45%|███| 249/553 [11:21<13:51,  2.74s/it]"
-    """
+    """sys.stderr 를 가로채 tqdm 출력을 파싱해 상태/진행률 콜백으로 라우팅한다."""
 
     _TQDM_RE = _re.compile(
         r"^(?P<stage>[^:]+):\s+(?P<pct>\d+)%\|[^|]*\|\s*(?P<cur>\d+)/(?P<tot>\d+)"
@@ -135,7 +133,6 @@ class _TqdmRouter:
         if self._orig_stderr:
             self._orig_stderr.write(text)
         self._buf += text
-        # \r 또는 \n 기준으로 줄 분리
         parts = _re.split(r"[\r\n]", self._buf)
         self._buf = parts[-1]
         for line in parts[:-1]:
@@ -151,7 +148,7 @@ class _TqdmRouter:
                 self._status(f"{stage}: {cur}/{tot}")
                 self._progress(pct)
                 if pct == 100:
-                    self._log(f"✓ {stage} 완료 ({tot})\n")
+                    self._log(f"✓ {stage} Done ({tot})\n")
             else:
                 self._log(line + "\n")
 
@@ -166,7 +163,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         log.info("App.__init__ 시작")
-        self.title("PDF to EPUB Converter")
+        self.title(_t("app_title"))
         self.resizable(True, True)
         self.geometry("1000x820")
 
@@ -211,27 +208,27 @@ class App(tk.Tk):
 
         # 파일 메뉴
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="다른 PDF 열기...", command=self._on_open_other_pdf)
+        file_menu.add_command(label=_t("menu_open"), command=self._on_open_other_pdf)
         file_menu.add_separator()
-        file_menu.add_command(label="종료", command=self.destroy)
-        menubar.add_cascade(label="파일", menu=file_menu)
+        file_menu.add_command(label=_t("menu_exit"), command=self.destroy)
+        menubar.add_cascade(label=_t("menu_file"), menu=file_menu)
 
         # 옵션 메뉴
         options_menu = tk.Menu(menubar, tearoff=0)
         options_menu.add_checkbutton(
-            label="텍스트 추출 모드 (실험적)",
+            label=_t("menu_text_mode"),
             variable=self._var_text_mode,
         )
         options_menu.add_checkbutton(
-            label="실시간 로그 보기",
+            label=_t("menu_show_log"),
             variable=self._var_log_visible,
             command=self._on_log_menu_toggle,
         )
-        menubar.add_cascade(label="옵션", menu=options_menu)
+        menubar.add_cascade(label=_t("menu_options"), menu=options_menu)
 
     def _on_open_other_pdf(self) -> None:
         """기존 문서를 닫고 새로운 PDF를 선택하여 엽니다."""
-        log.info("다른 PDF 열기 선택")
+        log.info(_t("log_open_pdf"))
         self._open_pdf()
 
     def _on_log_menu_toggle(self) -> None:
@@ -248,36 +245,36 @@ class App(tk.Tk):
         log.debug("_build_ui 진입")
 
         # 상단: 변환 영역 레이블
-        self._crop_label = tk.Label(self, text="💡 마우스로 드래그하여 변환할 영역을 지정하세요  |  페이지 0/0", anchor="w", padx=8)
+        self._crop_label = tk.Label(self, text=f"💡 {_t('guide_drag')}  |  {_t('label_page')} 0/0", anchor="w", padx=8)
         self._crop_label.pack(fill="x")
-
 
         # 상단: 기본값 툴바
         toolbar = tk.Frame(self)
         toolbar.pack(fill="x", padx=4, pady=2)
         self._btn_save_default = tk.Button(
-            toolbar, text="이후 페이지에 적용", state="disabled",
+            toolbar, text=_t("btn_apply_subsequent"), state="disabled",
             command=self._on_save_as_default,
         )
         self._btn_save_default.pack(side="left", padx=2)
         self._btn_load_default = tk.Button(
-            toolbar, text="기본 영역 적용", state="disabled",
+            toolbar, text=_t("btn_load_default"), state="disabled",
             command=self._on_load_default,
         )
         self._btn_load_default.pack(side="left", padx=2)
-        self._default_label = tk.Label(toolbar, text="기본 영역: 미설정",
+        self._default_label = tk.Label(toolbar, text=f"{_t('label_crop_area')} ({_t('btn_load_default')}): {_t('label_not_set')}",
                                         fg="#666", anchor="w")
         self._default_label.pack(side="left", padx=8)
 
         # 표지 지정 버튼 추가
         self._cover_page: Optional[int] = 1 # 기본값 1페이지
         self._btn_set_cover = tk.Button(
-            toolbar, text="현재 페이지를 표지로 지정", state="disabled",
+            toolbar, text=_t("btn_set_cover"), state="disabled",
             command=self._on_set_cover,
         )
         self._btn_set_cover.pack(side="left", padx=2)
-        self._cover_label = tk.Label(toolbar, text="표지: 1페이지", fg="#0055cc")
+        self._cover_label = tk.Label(toolbar, text=f"{_t('label_cover')}: 1{_t('label_page')}", fg="#0055cc")
         self._cover_label.pack(side="left", padx=8)
+
 
         # 중앙: 뷰어 + 네비게이션
         center_frame = tk.Frame(self)
@@ -303,7 +300,7 @@ class App(tk.Tk):
         ch = 600
         self._canvas.create_text(
             cw / 2, ch / 2,
-            text="📂 상단의 [파일] → [다른 PDF 열기...] 메뉴를 통해 변환할 PDF를 선택하세요.",
+            text=_t("guide_startup"),
             fill="#ffffff", font=("Arial", 16, "bold"),
             tags="startup_guide"
         )
@@ -364,7 +361,7 @@ class App(tk.Tk):
         self._accordion_header.pack(fill="x")
 
         self._status_label = tk.Label(
-            self._accordion_header, text="준비", anchor="w", padx=4,
+            self._accordion_header, text=_t("status_ready"), anchor="w", padx=4,
         )
         self._status_label.pack(side="left", fill="x", expand=True)
 
@@ -399,7 +396,7 @@ class App(tk.Tk):
     def _set_status(self, msg: str, value: int = 0, maximum: int = 0,
                     indeterminate: bool = False) -> None:
         """상태 메시지와 진행률 바를 업데이트한다. 반드시 메인 스레드에서 호출."""
-        log.debug("상태: %s (value=%d, max=%d, indeterminate=%s)",
+        log.debug("Status: %s (value=%d, max=%d, indeterminate=%s)",
                   msg, value, maximum, indeterminate)
         self._status_label.config(text=msg)
         if indeterminate:
@@ -408,8 +405,6 @@ class App(tk.Tk):
             self._stop_pulse()
             self._progress_bar.config(mode="determinate",
                                        maximum=max(maximum, 1), value=value)
-        # update_idletasks() 를 여기서 호출하면 ArrangePacking 이 누적된
-        # 모든 위젯을 재배치해 O(n²) 레이아웃 폭발이 발생하므로 호출하지 않는다.
 
     def _start_pulse(self) -> None:
         """native indeterminate 대신 determinate 모드로 직접 펄스 애니메이션."""
@@ -440,7 +435,7 @@ class App(tk.Tk):
         self._btn_convert.config(state=state)
         self._btn_prev.config(state=state)
         self._btn_next.config(state=state)
-        log.debug("UI %s", "잠금" if lock else "잠금 해제")
+        log.debug("UI %s", "Locked" if lock else "Unlocked")
 
     # ── 로그 패널 헬퍼 ───────────────────────────────────────────────────────
 
@@ -477,28 +472,28 @@ class App(tk.Tk):
     # ── PDF 열기 ─────────────────────────────────────────────────────────────
 
     def _open_pdf(self) -> None:
-        log.info("PDF 파일 선택 대화상자 열기")
+        log.info(_t("log_open_pdf"))
         path = filedialog.askopenfilename(
-            title="PDF 파일을 선택하세요",
+            title=_t("menu_open"),
             filetypes=[("PDF files", "*.pdf")],
         )
         if not path:
-            log.info("파일 선택 취소")
+            log.info("File selection cancelled")
             return
 
         self._pdf_path = Path(path)
-        log.info("선택된 파일: %s", self._pdf_path)
+        log.info(_t("log_selected", path=self._pdf_path))
 
         # 새 문서를 열 때 이전의 크롭 영역 설정(CropStore) 및 표지 설정 완전히 초기화
         self._crop_store = CropStore()
         self._cover_page = 1
-        self._cover_label.config(text="표지: 1페이지")
+        self._cover_label.config(text=f"{_t('label_cover')}: 1{_t('label_page')}")
         self._update_toolbar()
 
-        self._set_status("PDF 열기 중...")
+        self._set_status(_t("status_opening"))
         with fitz.open(str(self._pdf_path)) as doc:
             self._page_count = doc.page_count
-        log.info("페이지 수: %d", self._page_count)
+        log.info(_t("log_page_count", count=self._page_count))
 
         self._current_page = 1
         # 새 문서를 로드하므로 시작 시 그려뒀던 "다른 PDF 열기" 가이드라인 삭제
@@ -512,36 +507,27 @@ class App(tk.Tk):
     def _render_page(self, page_number: int) -> None:
         if self._pdf_path is None:
             return
-        log.debug("페이지 렌더링 시작: %d / %d", page_number, self._page_count)
-        self._set_status(f"페이지 렌더링 중... ({page_number}/{self._page_count})")
+        log.debug("Rendering page: %d / %d", page_number, self._page_count)
+        self._set_status(f"{_t('status_rendering')} ({page_number}/{self._page_count})")
 
         self.update_idletasks()
         cw = self._canvas.winfo_width()
         ch = self._canvas.winfo_height()
-        if cw < 2:
-            cw = 700
-        if ch < 2:
-            ch = 600
+        if cw < 2: cw = 700
+        if ch < 2: ch = 600
 
         with fitz.open(str(self._pdf_path)) as doc:
             page = doc[page_number - 1]
             scale = min(cw / page.rect.width, ch / page.rect.height)
-            log.debug("캔버스 크기: %dx%d, 페이지 크기: %.1fx%.1f, 스케일: %.3f",
-                      cw, ch, page.rect.width, page.rect.height, scale)
             pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
             self._scale_x = pix.width / page.rect.width
             self._scale_y = pix.height / page.rect.height
 
-        log.debug("픽스맵 생성 완료: %dx%d px, scale_x=%.3f scale_y=%.3f",
-                  pix.width, pix.height, self._scale_x, self._scale_y)
-
         png_data = pix.tobytes("png")
         photo = tk.PhotoImage(data=base64.b64encode(png_data))
 
-        # 이미지를 캔버스 중앙에 배치
         self._img_offset_x = (cw - pix.width) / 2
         self._img_offset_y = (ch - pix.height) / 2
-        log.debug("이미지 offset: (%.1f, %.1f)", self._img_offset_x, self._img_offset_y)
 
         self._canvas.delete("all")
         self._canvas.create_image(self._img_offset_x, self._img_offset_y,
@@ -550,7 +536,6 @@ class App(tk.Tk):
 
         rect = self._crop_store.get(page_number)
         if rect is not None:
-            log.debug("크롭 오버레이 적용: %s", rect)
             self._draw_crop_overlay(rect)
         else:
             # 영역 미지정 시 캔버스 중앙에 시각적 가이드 추가
@@ -558,7 +543,7 @@ class App(tk.Tk):
             ch = self._canvas.winfo_height()
             self._canvas.create_text(
                 cw / 2, ch / 2,
-                text="여기를 마우스로 드래그하여 영역을 선택하세요",
+                text=_t("guide_drag"),
                 fill="#ffffff", font=("Arial", 16, "bold"),
                 tags="guide_text"
             )
@@ -573,8 +558,7 @@ class App(tk.Tk):
 
         self._update_crop_label(page_number)
         self._update_toolbar()
-        self._set_status("준비")
-        log.debug("페이지 렌더링 완료: %d", page_number)
+        self._set_status(_t("status_ready"))
 
     # ── 크롭 오버레이 ────────────────────────────────────────────────────────
 
@@ -991,18 +975,13 @@ class App(tk.Tk):
         """잘림 감지 다이얼로그 — True: Edit Area, False: Proceed."""
         result: list[bool] = [False]
         dlg = tk.Toplevel(self)
-        dlg.title("콘텐츠 잘림 감지")
+        dlg.title(_t("dlg_clipped_title"))
         dlg.resizable(False, False)
         dlg.grab_set()
 
         tk.Label(
             dlg,
-            text=(
-                f"{pages_str} 페이지에서 지정된 영역 밖으로 콘텐츠가 잘립니다.\n"
-                "영역을 수정하시겠습니까?\n\n"
-                "Edit Area → 첫 번째 문제 페이지로 이동\n"
-                "Proceed   → 현재 설정으로 그대로 변환"
-            ),
+            text=_t("dlg_clipped_msg", pages=pages_str),
             justify="left",
             padx=20,
             pady=16,
@@ -1031,11 +1010,11 @@ class App(tk.Tk):
 
     def _on_validation_done(self, clipped: list[int]) -> None:
         self._lock_ui(False)
-        self._set_status("준비")
+        self._set_status(_t("status_ready"))
 
         if clipped:
             pages_str = ", ".join(str(p) for p in clipped)
-            log.warning("콘텐츠 잘림 감지: 페이지 %s", pages_str)
+            log.warning("Content cutoff detected: page %s", pages_str)
             answer = self._ask_clipped_dialog(pages_str)
             if answer:
                 self._guide_through_clipped(clipped)
@@ -1047,36 +1026,33 @@ class App(tk.Tk):
         if not clipped_pages:
             return
         first = clipped_pages[0]
-        remaining = clipped_pages[1:]
-        msg = f"페이지 {first}로 이동합니다. 영역을 조정한 뒤 Convert를 다시 눌러주세요."
-        if remaining:
-            msg += (f"\n\n아직 {len(remaining)}개 페이지가 더 있습니다: "
-                    f"{', '.join(str(p) for p in remaining)}")
-        messagebox.showinfo("영역 조정 안내", msg)
+        msg = _t("dlg_guide_msg", page=first)
+        messagebox.showinfo(_t("dlg_guide_title"), msg)
         self._go_to_page(first)
 
     def _do_convert(self) -> None:
         assert self._pdf_path is not None
         output_path = filedialog.asksaveasfilename(
-            title="EPUB 저장 위치",
+            title=_t("app_title"),
             defaultextension=".epub",
             initialfile=self._pdf_path.stem + ".epub",
             filetypes=[("EPUB files", "*.epub")],
         )
         if not output_path:
-            log.info("저장 경로 선택 취소")
+            log.info("Save path selection cancelled")
             return
 
         use_text_mode = self._var_text_mode.get()
-        log.info("변환 시작: %s → %s (텍스트 모드: %s)", self._pdf_path, output_path, use_text_mode)
+        log.info(_t("log_convert_start", input=self._pdf_path.name, output=Path(output_path).name, mode=str(use_text_mode)))
         self._lock_ui(True)
         if not self._log_panel_visible:
             self._toggle_log_panel()
         self._set_status(
-            "marker 모델 로딩 중..." if use_text_mode else "EPUB 변환 중...",
+            _t("status_loading_models") if use_text_mode else _t("status_converting"),
             indeterminate=True,
         )
 
+        # ... (생략된 임포트 및 모듈 로드 코드)
         import sys
         import importlib.util
         spec = importlib.util.spec_from_file_location(
@@ -1089,15 +1065,15 @@ class App(tk.Tk):
         all_rects  = self._crop_store.all_rects(self._page_count)
         crop_rects = {p: r for p, r in all_rects.items() if r is not None}
         out        = Path(output_path)
-        log.debug("변환 crop_rects 수: %d", len(crop_rects))
+        log.debug("Crop rects count: %d", len(crop_rects))
 
         def _on_convert_done(success: bool, msg: str) -> None:
             """메인 스레드에서 실행되어 팝업과 UI 잠금 해제를 순차적으로 안전하게 처리한다."""
-            self._set_status("준비")
+            self._set_status(_t("status_ready"))
             if success:
-                messagebox.showinfo("완료", msg, parent=self)
+                messagebox.showinfo(_t("msg_done"), msg, parent=self)
             else:
-                messagebox.showerror("변환 실패", msg, parent=self)
+                messagebox.showerror(_t("msg_fail"), msg, parent=self)
             self._lock_ui(False)
 
         def worker() -> None:
@@ -1109,7 +1085,7 @@ class App(tk.Tk):
                         crop_rects=crop_rects if crop_rects else None,
                         logger=log,
                         progress_callback=lambda cur, tot: self.after(
-                            0, lambda: self._set_status(f"페이지 변환 중... ({cur}/{tot})", cur, tot)
+                            0, lambda: self._set_status(f"{_t('status_converting')} ({cur}/{tot})", cur, tot)
                         ),
                         cover_page=self._cover_page
                     )
@@ -1120,11 +1096,11 @@ class App(tk.Tk):
                         crop_rects=crop_rects,
                         logger=log,
                     )
-                log.info("변환 완료: %s", out)
-                self.after(0, _on_convert_done, True, f"변환이 완료됐습니다:\n{out}")
+                log.info("Conversion complete: %s", out)
+                self.after(0, _on_convert_done, True, _t("msg_done_path", path=out))
             except Exception as exc:
                 msg = str(exc)
-                log.exception("변환 실패: %s", msg)
+                log.exception("Conversion failed: %s", msg)
                 self.after(0, _on_convert_done, False, msg)
 
         threading.Thread(target=worker, daemon=True).start()

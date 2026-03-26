@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+from i18n import _t
+
 REQUIRED_COMMANDS = ("pdfinfo",)
 
 
@@ -413,7 +415,7 @@ def convert_pdf_to_epub_text_mode(
     progress_callback: any | None = None,
     cover_page: int = 1,
 ) -> None:
-    """marker 를 사용해 페이지별로 개별 변환하여 리플로우 EPUB 을 생성한다."""
+    """Convert PDF to reflowable EPUB using marker page-by-page."""
     from marker_extractor import load_models, extract_pages_markdown  # type: ignore[import]
 
     if not input_pdf.exists():
@@ -424,7 +426,7 @@ def convert_pdf_to_epub_text_mode(
     author = pdf_author or "Unknown"
 
     if logger:
-        logger.info("텍스트 모드 개별 변환 시작: %s → %s (표지: %d페이지)", input_pdf, output_epub, cover_page)
+        logger.info(_t("log_convert_start", input=input_pdf.name, output=output_epub.name, mode="Text"))
 
     # 1. 표지 이미지 추출 (임시 디렉토리 사용)
     cover_image_path = None
@@ -449,7 +451,7 @@ def convert_pdf_to_epub_text_mode(
         )
 
         if logger:
-            logger.info("%d 페이지 개별 변환 완료 (%d 이미지), EPUB 빌드 중...", len(pages_md), len(images))
+            logger.info(f"Individual conversion of {len(pages_md)} pages finished. Building EPUB...")
 
         write_reflowable_epub(
             output_path=output_epub,
