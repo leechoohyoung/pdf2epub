@@ -1019,43 +1019,6 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _ask_clipped_dialog(self, pages_str: str) -> bool:
-        """잘림 감지 다이얼로그 — True: Edit Area, False: Proceed."""
-        result: list[bool] = [False]
-        dlg = tk.Toplevel(self)
-        dlg.title(_t("dlg_clipped_title"))
-        dlg.resizable(False, False)
-        dlg.grab_set()
-
-        tk.Label(
-            dlg,
-            text=_t("dlg_clipped_msg", pages=pages_str),
-            justify="left",
-            padx=20,
-            pady=16,
-            wraplength=420,
-        ).pack()
-
-        btn_frame = tk.Frame(dlg)
-        btn_frame.pack(pady=(0, 14))
-
-        def on_edit() -> None:
-            result[0] = True
-            dlg.destroy()
-
-        def on_proceed() -> None:
-            dlg.destroy()
-
-        tk.Button(btn_frame, text="Edit Area", width=12, command=on_edit).pack(
-            side="left", padx=8
-        )
-        tk.Button(btn_frame, text="Proceed", width=12, command=on_proceed).pack(
-            side="left", padx=8
-        )
-
-        dlg.wait_window()
-        return result[0]
-
     def _on_validation_done(self, clipped: list[int]) -> None:
         self._lock_ui(False)
         self._set_status(_t("status_ready"))
@@ -1063,21 +1026,8 @@ class App(tk.Tk):
         if clipped:
             pages_str = ", ".join(str(p) for p in clipped)
             log.warning("Content cutoff detected: page %s", pages_str)
-            # --- 사용자 요청으로 잘림 경고 팝업 생략 및 즉시 변환 ---
-            # answer = self._ask_clipped_dialog(pages_str)
-            # if answer:
-            #     self._guide_through_clipped(clipped)
-            #     return
 
         self._do_convert()
-
-    def _guide_through_clipped(self, clipped_pages: list[int]) -> None:
-        if not clipped_pages:
-            return
-        first = clipped_pages[0]
-        msg = _t("dlg_guide_msg", page=first)
-        messagebox.showinfo(_t("dlg_guide_title"), msg)
-        self._go_to_page(first)
 
     def _do_convert(self) -> None:
         assert self._pdf_path is not None
@@ -1094,10 +1044,6 @@ class App(tk.Tk):
         use_text_mode = self._var_text_mode.get()
         log.info(_t("log_convert_start", input=self._pdf_path.name, output=Path(output_path).name, mode=str(use_text_mode)))
         self._lock_ui(True)
-        
-        # --- 사용자 요청으로 로그 패널 강제 활성화 제거 ---
-        # if not self._log_panel_visible:
-        #     self._toggle_log_panel()
         
         self._set_status(
             _t("status_loading_models") if use_text_mode else _t("status_converting"),
