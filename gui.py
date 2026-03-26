@@ -226,6 +226,43 @@ class App(tk.Tk):
         )
         menubar.add_cascade(label=_t("menu_options"), menu=options_menu)
 
+        # 언어 메뉴 (Language)
+        lang_menu = tk.Menu(menubar, tearoff=0)
+        lang_menu.add_command(label=_t("lang_ko"), command=lambda: self._change_language("ko"))
+        lang_menu.add_command(label=_t("lang_en"), command=lambda: self._change_language("en"))
+        menubar.add_cascade(label=_t("menu_language"), menu=lang_menu)
+
+    def _change_language(self, lang: str) -> None:
+        """선택한 언어로 설정을 변경하고 화면의 텍스트를 즉시 새로고침한다."""
+        from i18n import set_language
+        set_language(lang)
+        log.info("언어 변경: %s", lang)
+        
+        # 메뉴바 다시 빌드 (기존 위젯은 그대로 두고 설정만 변경)
+        self._build_menu()
+        
+        # 기본 텍스트 갱신
+        self.title(_t("app_title"))
+        self._btn_save_default.config(text=_t("btn_apply_subsequent"))
+        self._btn_load_default.config(text=_t("btn_load_default"))
+        self._btn_set_cover.config(text=_t("btn_set_cover"))
+        self._btn_prev.config(text=_t("btn_prev"))
+        self._btn_next.config(text=_t("btn_next"))
+        self._btn_convert.config(text=_t("btn_convert"))
+        self._btn_cancel.config(text=_t("btn_cancel"))
+        self._status_label.config(text=_t("status_ready"))
+        
+        # 동적 레이블 갱신
+        self._update_toolbar()
+        self._update_crop_label(self._current_page)
+        self._cover_label.config(text=f"{_t('label_cover')}: {self._cover_page}{_t('label_page')}")
+        
+        # 캔버스 가이드 텍스트 갱신
+        if self._pdf_path is None:
+            self._canvas.itemconfigure("startup_guide_text", text=_t("guide_startup"))
+        elif self._crop_store.get(self._current_page) is None:
+            self._canvas.itemconfigure("guide_text_text", text=_t("guide_drag"))
+
     def _on_open_other_pdf(self) -> None:
         """기존 문서를 닫고 새로운 PDF를 선택하여 엽니다."""
         log.info(_t("log_open_pdf"))
@@ -302,7 +339,7 @@ class App(tk.Tk):
             cw / 2, ch / 2,
             text=_t("guide_startup"),
             fill="#ffffff", font=("Arial", 16, "bold"),
-            tags="startup_guide"
+            tags=("startup_guide", "startup_guide_text")
         )
         self._canvas.tag_lower(
             self._canvas.create_rectangle(
@@ -383,11 +420,12 @@ class App(tk.Tk):
         # 3) Convert / Cancel 버튼 — 상태바 바로 위
         btn_frame = tk.Frame(self)
         btn_frame.pack(fill="x", side="bottom")
-        self._btn_convert = tk.Button(btn_frame, text="Convert", width=12,
+        self._btn_convert = tk.Button(btn_frame, text=_t("btn_convert"), width=12,
                                        command=self._on_convert)
         self._btn_convert.pack(side="right", padx=4, pady=4)
-        tk.Button(btn_frame, text="Cancel", width=12,
-                  command=self.destroy).pack(side="right", padx=4, pady=4)
+        self._btn_cancel = tk.Button(btn_frame, text=_t("btn_cancel"), width=12,
+                  command=self.destroy)
+        self._btn_cancel.pack(side="right", padx=4, pady=4)
 
         log.debug("_build_ui 완료")
 
@@ -545,7 +583,7 @@ class App(tk.Tk):
                 cw / 2, ch / 2,
                 text=_t("guide_drag"),
                 fill="#ffffff", font=("Arial", 16, "bold"),
-                tags="guide_text"
+                tags=("guide_text", "guide_text_text")
             )
             # 가이드 텍스트 뒤에 배경 박스 (가독성 및 눈에 띄게)
             self._canvas.tag_lower(
@@ -1015,10 +1053,11 @@ class App(tk.Tk):
         if clipped:
             pages_str = ", ".join(str(p) for p in clipped)
             log.warning("Content cutoff detected: page %s", pages_str)
-            answer = self._ask_clipped_dialog(pages_str)
-            if answer:
-                self._guide_through_clipped(clipped)
-                return
+            # --- 사용자 요청으로 잘림 경고 팝업 생략 및 즉시 변환 ---
+            # answer = self._ask_clipped_dialog(pages_str)
+            # if answer:
+            #     self._guide_through_clipped(clipped)
+            #     return
 
         self._do_convert()
 
@@ -1045,8 +1084,11 @@ class App(tk.Tk):
         use_text_mode = self._var_text_mode.get()
         log.info(_t("log_convert_start", input=self._pdf_path.name, output=Path(output_path).name, mode=str(use_text_mode)))
         self._lock_ui(True)
-        if not self._log_panel_visible:
-            self._toggle_log_panel()
+        
+        # --- 사용자 요청으로 로그 패널 강제 활성화 제거 ---
+        # if not self._log_panel_visible:
+        #     self._toggle_log_panel()
+        
         self._set_status(
             _t("status_loading_models") if use_text_mode else _t("status_converting"),
             indeterminate=True,
