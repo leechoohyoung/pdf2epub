@@ -194,11 +194,53 @@ class App(tk.Tk):
         self._pulse_direction: int = 1
 
         self._var_text_mode = tk.BooleanVar(value=False)
+        self._var_log_visible = tk.BooleanVar(value=False)
         self._log_panel_visible: bool = False
 
+        self._build_menu()
         self._build_ui()
         log.info("UI 빌드 완료")
+        # 시작 시 즉시 파일 선택 대화상자를 띄우지 않음
+        # self._open_pdf()
+
+    # ── 메뉴바 빌드 ───────────────────────────────────────────────────────────
+
+    def _build_menu(self) -> None:
+        menubar = tk.Menu(self)
+        self.config(menu=menubar)
+
+        # 파일 메뉴
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="다른 PDF 열기...", command=self._on_open_other_pdf)
+        file_menu.add_separator()
+        file_menu.add_command(label="종료", command=self.destroy)
+        menubar.add_cascade(label="파일", menu=file_menu)
+
+        # 옵션 메뉴
+        options_menu = tk.Menu(menubar, tearoff=0)
+        options_menu.add_checkbutton(
+            label="텍스트 추출 모드 (실험적)",
+            variable=self._var_text_mode,
+        )
+        options_menu.add_checkbutton(
+            label="실시간 로그 보기",
+            variable=self._var_log_visible,
+            command=self._on_log_menu_toggle,
+        )
+        menubar.add_cascade(label="옵션", menu=options_menu)
+
+    def _on_open_other_pdf(self) -> None:
+        """기존 문서를 닫고 새로운 PDF를 선택하여 엽니다."""
+        log.info("다른 PDF 열기 선택")
         self._open_pdf()
+
+    def _on_log_menu_toggle(self) -> None:
+        """메뉴의 체크 상태에 따라 로그 패널을 강제로 열거나 닫는다."""
+        show = self._var_log_visible.get()
+        if show and not self._log_panel_visible:
+            self._toggle_log_panel()
+        elif not show and self._log_panel_visible:
+            self._toggle_log_panel()
 
     # ── UI 빌드 ──────────────────────────────────────────────────────────────
 
@@ -206,8 +248,9 @@ class App(tk.Tk):
         log.debug("_build_ui 진입")
 
         # 상단: 변환 영역 레이블
-        self._crop_label = tk.Label(self, text="변환 영역: 미설정", anchor="w", padx=8)
+        self._crop_label = tk.Label(self, text="💡 마우스로 드래그하여 변환할 영역을 지정하세요  |  페이지 0/0", anchor="w", padx=8)
         self._crop_label.pack(fill="x")
+
 
         # 상단: 기본값 툴바
         toolbar = tk.Frame(self)
@@ -225,6 +268,16 @@ class App(tk.Tk):
         self._default_label = tk.Label(toolbar, text="기본 영역: 미설정",
                                         fg="#666", anchor="w")
         self._default_label.pack(side="left", padx=8)
+
+        # 표지 지정 버튼 추가
+        self._cover_page: Optional[int] = 1 # 기본값 1페이지
+        self._btn_set_cover = tk.Button(
+            toolbar, text="현재 페이지를 표지로 지정", state="disabled",
+            command=self._on_set_cover,
+        )
+        self._btn_set_cover.pack(side="left", padx=2)
+        self._cover_label = tk.Label(toolbar, text="표지: 1페이지", fg="#0055cc")
+        self._cover_label.pack(side="left", padx=8)
 
         # 중앙: 뷰어 + 네비게이션
         center_frame = tk.Frame(self)
@@ -244,6 +297,23 @@ class App(tk.Tk):
         self._btn_next = tk.Button(center_frame, text="다음 페이지",
                                    command=self._next_page)
         self._btn_next.pack(side="left", fill="y")
+
+        # 중앙 캔버스 초기 상태 (PDF 열기 안내)
+        cw = 700
+        ch = 600
+        self._canvas.create_text(
+            cw / 2, ch / 2,
+            text="📂 상단의 [파일] → [다른 PDF 열기...] 메뉴를 통해 변환할 PDF를 선택하세요.",
+            fill="#ffffff", font=("Arial", 16, "bold"),
+            tags="startup_guide"
+        )
+        self._canvas.tag_lower(
+            self._canvas.create_rectangle(
+                cw / 2 - 320, ch / 2 - 30, cw / 2 + 320, ch / 2 + 30,
+                fill="#333333", outline="#00aaff", width=2, tags="startup_guide"
+            ),
+            "startup_guide"
+        )
 
         # ── 하단 영역 (side="bottom" 역순 패킹) ──────────────────────────────
         # 1) 썸네일 스트립 — 가장 아래
@@ -293,12 +363,6 @@ class App(tk.Tk):
         self._accordion_header = tk.Frame(accordion)
         self._accordion_header.pack(fill="x")
 
-        self._log_toggle_btn = tk.Button(
-            self._accordion_header, text="확장", width=4,
-            relief="flat", command=self._toggle_log_panel,
-        )
-        self._log_toggle_btn.pack(side="left", padx=2, pady=1)
-
         self._status_label = tk.Label(
             self._accordion_header, text="준비", anchor="w", padx=4,
         )
@@ -327,11 +391,6 @@ class App(tk.Tk):
         self._btn_convert.pack(side="right", padx=4, pady=4)
         tk.Button(btn_frame, text="Cancel", width=12,
                   command=self.destroy).pack(side="right", padx=4, pady=4)
-        tk.Checkbutton(
-            btn_frame,
-            text="텍스트 추출 모드 (실험적)",
-            variable=self._var_text_mode,
-        ).pack(side="left", padx=8)
 
         log.debug("_build_ui 완료")
 
@@ -388,15 +447,15 @@ class App(tk.Tk):
     def _toggle_log_panel(self) -> None:
         if self._log_panel_visible:
             self._log_panel.pack_forget()
-            self._log_toggle_btn.config(text="확장")
             self._log_panel_visible = False
+            self._var_log_visible.set(False)
         else:
             self._log_panel.pack(
                 fill="both", expand=True,
                 before=self._accordion_header,
             )
-            self._log_toggle_btn.config(text="축소")
             self._log_panel_visible = True
+            self._var_log_visible.set(True)
 
     def _append_log(self, msg: str) -> None:
         """스레드에서 호출 가능한 로그 텍스트 추가."""
@@ -424,12 +483,17 @@ class App(tk.Tk):
             filetypes=[("PDF files", "*.pdf")],
         )
         if not path:
-            log.info("파일 선택 취소 → 종료")
-            self.destroy()
+            log.info("파일 선택 취소")
             return
 
         self._pdf_path = Path(path)
         log.info("선택된 파일: %s", self._pdf_path)
+
+        # 새 문서를 열 때 이전의 크롭 영역 설정(CropStore) 및 표지 설정 완전히 초기화
+        self._crop_store = CropStore()
+        self._cover_page = 1
+        self._cover_label.config(text="표지: 1페이지")
+        self._update_toolbar()
 
         self._set_status("PDF 열기 중...")
         with fitz.open(str(self._pdf_path)) as doc:
@@ -437,6 +501,9 @@ class App(tk.Tk):
         log.info("페이지 수: %d", self._page_count)
 
         self._current_page = 1
+        # 새 문서를 로드하므로 시작 시 그려뒀던 "다른 PDF 열기" 가이드라인 삭제
+        self._canvas.delete("startup_guide")
+        
         self._render_page(self._current_page)
         self._build_thumbnails()
 
@@ -712,11 +779,23 @@ class App(tk.Tk):
         self._update_crop_label(self._current_page)
         self._update_toolbar()
 
+    def _on_set_cover(self) -> None:
+        self._cover_page = self._current_page
+        self._cover_label.config(text=f"표지: {self._cover_page}페이지")
+        log.info("표지 페이지 설정: %d", self._cover_page)
+        # 썸네일 하이라이트 갱신 (선택 사항)
+        self._highlight_thumb(self._current_page)
+
     def _update_toolbar(self) -> None:
+        if self._pdf_path is None:
+            return
+        
         has_rect    = self._crop_store.get(self._current_page) is not None
         has_default = self._crop_store.get_default() is not None
         self._btn_save_default.config(state="normal" if has_rect    else "disabled")
         self._btn_load_default.config(state="normal" if has_default else "disabled")
+        self._btn_set_cover.config(state="normal") # 문서가 열려있으면 항상 가능
+
         default = self._crop_store.get_default()
         if default:
             self._default_label.config(
@@ -1031,7 +1110,8 @@ class App(tk.Tk):
                         logger=log,
                         progress_callback=lambda cur, tot: self.after(
                             0, lambda: self._set_status(f"페이지 변환 중... ({cur}/{tot})", cur, tot)
-                        )
+                        ),
+                        cover_page=self._cover_page
                     )
                 else:
                     module.convert_pdf_to_epub(

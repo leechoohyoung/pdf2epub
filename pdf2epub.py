@@ -238,6 +238,7 @@ def build_reflowable_opf(
     language: str,
     page_count: int,
     image_names: list[str] | None = None,
+    cover_image_name: str | None = None,
 ) -> str:
     manifest_items = [
         '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
@@ -255,9 +256,19 @@ def build_reflowable_opf(
         for idx, img_name in enumerate(image_names):
             ext = img_name.split('.')[-1].lower()
             media_type = "image/jpeg" if ext in ("jpg", "jpeg") else "image/png"
+            
+            # 표지 이미지 처리
+            is_cover = (img_name == cover_image_name)
+            prop = ' properties="cover-image"' if is_cover else ""
+            iid = "cover-image" if is_cover else f"img-{idx:04d}"
+            
             manifest_items.append(
-                f'<item id="img-{idx:04d}" href="images/{img_name}" media-type="{media_type}"/>'
+                f'<item id="{iid}" href="images/{img_name}" media-type="{media_type}"{prop}/>'
             )
+
+    cover_meta = ""
+    if cover_image_name:
+        cover_meta = f'\n    <meta name="cover" content="cover-image"/>'
 
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
@@ -266,7 +277,7 @@ def build_reflowable_opf(
     <dc:title>{html.escape(title)}</dc:title>
     <dc:language>{html.escape(language)}</dc:language>
     <dc:creator>{html.escape(author or 'Unknown')}</dc:creator>
-    <meta property="dcterms:modified">2026-03-25T00:00:00Z</meta>
+    <meta property="dcterms:modified">2026-03-25T00:00:00Z</meta>{cover_meta}
   </metadata>
   <manifest>
     {''.join(manifest_items)}
@@ -400,6 +411,7 @@ def convert_pdf_to_epub_text_mode(
     logger: logging.Logger | None = None,
     crop_rects: dict[int, tuple[float, float, float, float] | None] | None = None,
     progress_callback: any | None = None,
+    cover_page: int = 1,
 ) -> None:
     """marker 를 사용해 페이지별로 개별 변환하여 리플로우 EPUB 을 생성한다."""
     from marker_extractor import load_models, extract_pages_markdown  # type: ignore[import]
@@ -412,25 +424,42 @@ def convert_pdf_to_epub_text_mode(
     author = pdf_author or "Unknown"
 
     if logger:
-        logger.info("텍스트 모드 개별 변환 시작: %s → %s", input_pdf, output_epub)
+        logger.info("텍스트 모드 개별 변환 시작: %s → %s (표지: %d페이지)", input_pdf, output_epub, cover_page)
 
-    models = load_models()
-    pages_md, images = extract_pages_markdown(
-        input_pdf, models, crop_rects=crop_rects,
-        progress_callback=progress_callback
-    )
+    # 1. 표지 이미지 추출 (임시 디렉토리 사용)
+    cover_image_path = None
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_cover = Path(tmp_dir) / "cover.png"
+        try:
+            # 원본 크기대로 추출 (이미지는 나중에 CSS로 조절)
+            render_page_to_png(input_pdf, cover_page, 200, tmp_cover)
+            if tmp_cover.exists():
+                # 실제 변환 로직으로 전달하기 위해 바깥으로 복사하거나 경로 유지
+                # 여기서는 write_reflowable_epub이 호출될 때까지 유지되어야 하므로 
+                # 임시 파일 경로를 지정하되, write_reflowable_epub 안에서 즉시 처리함.
+                cover_image_path = tmp_cover
+        except Exception as e:
+            if logger:
+                logger.error("표지 추출 실패: %s", e)
 
-    if logger:
-        logger.info("%d 페이지 개별 변환 완료 (%d 이미지), EPUB 빌드 중...", len(pages_md), len(images))
+        models = load_models()
+        pages_md, images = extract_pages_markdown(
+            input_pdf, models, crop_rects=crop_rects,
+            progress_callback=progress_callback
+        )
 
-    write_reflowable_epub(
-        output_path=output_epub,
-        title=title,
-        author=author,
-        language=language,
-        pages_md=pages_md,
-        images=images,
-    )
+        if logger:
+            logger.info("%d 페이지 개별 변환 완료 (%d 이미지), EPUB 빌드 중...", len(pages_md), len(images))
+
+        write_reflowable_epub(
+            output_path=output_epub,
+            title=title,
+            author=author,
+            language=language,
+            pages_md=pages_md,
+            images=images,
+            cover_image_path=cover_image_path,
+        )
 
     if logger:
         logger.info("텍스트 모드 변환 완료: %s", output_epub)
