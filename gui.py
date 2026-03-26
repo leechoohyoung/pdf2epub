@@ -190,7 +190,7 @@ class App(tk.Tk):
         self._pulse_value: int = 0
         self._pulse_direction: int = 1
 
-        self._var_text_mode = tk.BooleanVar(value=False)
+        self._var_text_mode = tk.BooleanVar(value=True)
         self._var_log_visible = tk.BooleanVar(value=False)
         self._log_panel_visible: bool = False
 
@@ -243,6 +243,11 @@ class App(tk.Tk):
         
         # 기본 텍스트 갱신
         self.title(_t("app_title"))
+        if self._pdf_path:
+            self._file_label.config(text=f"{_t('app_title')} - {self._pdf_path.name}")
+        else:
+            self._file_label.config(text=_t("app_title"))
+
         self._btn_save_default.config(text=_t("btn_apply_subsequent"))
         self._btn_load_default.config(text=_t("btn_load_default"))
         self._btn_set_cover.config(text=_t("btn_set_cover"))
@@ -280,6 +285,10 @@ class App(tk.Tk):
 
     def _build_ui(self) -> None:
         log.debug("_build_ui 진입")
+
+        # 상단: 열린 파일 제목 영역 레이블
+        self._file_label = tk.Label(self, text=_t("app_title"), font=("Arial", 12, "bold"), anchor="w", padx=8, pady=4)
+        self._file_label.pack(fill="x")
 
         # 상단: 변환 영역 레이블
         self._crop_label = tk.Label(self, text=f"💡 {_t('guide_drag')}  |  {_t('label_page')} 0/0", anchor="w", padx=8)
@@ -521,6 +530,7 @@ class App(tk.Tk):
 
         self._pdf_path = Path(path)
         log.info(_t("log_selected", path=self._pdf_path))
+        self._file_label.config(text=f"{_t('app_title')} - {self._pdf_path.name}")
 
         # 새 문서를 열 때 이전의 크롭 영역 설정(CropStore) 및 표지 설정 완전히 초기화
         self._crop_store = CropStore()
