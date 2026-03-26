@@ -160,50 +160,29 @@ def _markdown_to_html_body(md_text: str) -> str:
     # 테이블 셀 내 <br> → 공백
     md_text = _re.sub(r'<br\s*/?>', ' ', md_text, flags=_re.IGNORECASE)
 
-    # 마스킹(Redaction)으로 인해 부자연스럽게 끊어진 문장 이어주기 (한국어/영어 휴리스틱)
-    # 단, 마크다운 문법(제목, 목록, 인용구, 표 등)을 해치지 않도록 주의
-    def _join_broken_lines(text: str) -> str:
-        lines = text.split('\n')
-        joined_lines = []
-        for i, line in enumerate(lines):
-            stripped = line.rstrip()
-            if not stripped:
-                joined_lines.append('')
-                continue
-            
-            # 다음 줄이 있고, 현재 줄이 마크다운 특수 기호나 마침표로 끝나지 않으며,
-            # 다음 줄도 일반 텍스트로 시작하는 경우 문장 이어주기 시도
-            is_normal_text_end = not _re.search(r'[.?!:;]$', stripped) and not stripped.endswith('|')
-            is_not_md_block = not _re.match(r'^(#|\*|-|>|\d+\.|\||```)', line.lstrip())
-            
-            if i + 1 < len(lines):
-                next_line = lines[i+1].lstrip()
-                next_is_normal = next_line and not _re.match(r'^(#|\*|-|>|\d+\.|\||```)', next_line)
-                
-                if is_normal_text_end and is_not_md_block and next_is_normal:
-                    # 한국어의 경우 띄어쓰기 없이 붙이거나 공백 하나로 붙임
-                    # 끝 글자가 한글이고 다음 첫 글자도 한글이면 띄어쓰기로 연결
-                    joined_lines.append(stripped + ' ')
-                    continue
-            
-            joined_lines.append(line)
-        
-        # ' \n' 형태로 임시 연결된 줄들을 완전히 합침
-        return ''.join(joined_lines).replace(' \n', ' ').replace('\n\n', '\n\n\n').replace('\n\n\n\n', '\n\n')
-
-    md_text = _join_broken_lines(md_text)
-
-    try:
-        import markdown2  # type: ignore[import]
-        # 표, 코드블록, 각주 등 지원 강화
-        return markdown2.markdown(md_text, extras=[
-            "tables", "fenced-code-blocks", "footnotes", "break-on-newline", "header-ids"
-        ])
-    except ImportError:
-        pass
+    # 강력한 마크다운 파싱을 위해 Python-Markdown 우선 사용 시도
+    # (markdown2보다 확장성이 좋고 표준 문법 처리에 강함)
     try:
         import markdown as md_lib  # type: ignore[import]
-        return md_lib.markdown(md_text, extensions=["extra"])
+        # extra: tables, fenced_code, footnotes, def_list 등 다양한 확장 포함
+        # nl2br: 줄바꿈을 <br>로 유지 (마크다운의 부드러운 줄바꿈 존중)
+        # sane_lists: 리스트 문법 엄격 적용
+        html_body = md_lib.markdown(
+            md_text, 
+            extensions=["extra", "nl2br", "sane_lists", "tables", "toc"]
+        )
+        return html_body
+    except ImportError:
+        pass
+
+    # fallback 1: markdown2
+    try:
+        import markdown2  # type: ignore[import]
+        html_body = markdown2.markdown(
+            md_text, 
+            extras=["tables", "fenced-code-blocks", "footnotes", "break-on-newline", "header-ids", "strike"]
+        )
+        return html_body
     except ImportError:
         pass
 
@@ -307,6 +286,7 @@ def write_reflowable_epub(
     language: str,
     pages_md: list[str],
     images: dict[str, any] | None = None,
+    cover_image_path: Path | None = None,
 ) -> None:
     identifier = f"urn:uuid:{uuid.uuid4()}"
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -322,18 +302,27 @@ pre, code { font-family: monospace; background-color: #f8f8f8; padding: 2px 4px;
 pre { padding: 10px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }
 blockquote { border-left: 4px solid #ddd; padding-left: 1em; color: #666; font-style: italic; }
 """
-    # 이미지 파일명 리스트 구성 및 실제 저장 준비
+    # 이미지 파일명 리스트 구성
     image_save_tasks: list[tuple[str, any]] = []
     image_names: list[str] = []
     if images:
         import re as _re
         for key, img_data in images.items():
-            # _markdown_to_html_body 의 _sanitize_filename 과 동일한 규칙 적용
             img_name = _re.sub(r'[\s/\\\:\*\?\"\<\>\|]', '_', key)
             image_names.append(img_name)
             image_save_tasks.append((img_name, img_data))
 
-    opf = build_reflowable_opf(identifier, title, author, language, len(pages_md), image_names)
+    # 표지가 있으면 리스트에 추가
+    actual_cover_name = None
+    if cover_image_path and cover_image_path.exists():
+        actual_cover_name = "cover" + cover_image_path.suffix
+        image_names.append(actual_cover_name)
+
+    # OPF 생성 시 표지 정보 전달
+    opf = build_reflowable_opf(
+        identifier, title, author, language, len(pages_md), 
+        image_names, cover_image_name=actual_cover_name
+    )
     nav_xhtml = build_nav_document(title)
 
     with zipfile.ZipFile(output_path, "w") as epub:
@@ -352,7 +341,11 @@ blockquote { border-left: 4px solid #ddd; padding-left: 1em; color: #666; font-s
         epub.writestr("OEBPS/nav.xhtml", nav_xhtml)
         epub.writestr("OEBPS/content.opf", opf)
 
-        # 이미지 저장
+        # 표지 파일 쓰기
+        if cover_image_path and cover_image_path.exists():
+            epub.write(cover_image_path, arcname=f"OEBPS/images/{actual_cover_name}")
+
+        # 일반 이미지 저장
         if image_save_tasks:
             import io
             from PIL import Image
@@ -361,7 +354,6 @@ blockquote { border-left: 4px solid #ddd; padding-left: 1em; color: #666; font-s
                 if hasattr(img_data, "save"): # PIL Image
                     ext = img_name.split('.')[-1].lower()
                     img_format = "JPEG" if ext in ("jpg", "jpeg") else "PNG"
-                    # RGB 모드로 변환 (JPEG 저장 시 투명도 오류 방지)
                     if img_format == "JPEG" and img_data.mode in ("RGBA", "P"):
                         img_data = img_data.convert("RGB")
                     img_data.save(img_bytes, format=img_format)

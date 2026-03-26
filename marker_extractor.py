@@ -68,6 +68,11 @@ def extract_pages_markdown(
     import tempfile
     import os
 
+    # 디버깅용 폴더 설정 ([PDF파일명]_debug_pages)
+    debug_dir = pdf_path.parent / f"{pdf_path.stem}_debug_pages"
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    log.info("디버깅용 개별 페이지 PDF 저장 경로: %s", debug_dir)
+
     with fitz.open(str(pdf_path)) as doc:
         total = len(doc)
         for i in range(total):
@@ -78,23 +83,43 @@ def extract_pages_markdown(
             # 1. 해당 페이지만 추출하여 임시 PDF 생성
             temp_doc = fitz.open()
             temp_doc.insert_pdf(doc, from_page=i, to_page=i)
+            page = temp_doc[0]
             
-            # 크롭 영역 적용 (있을 경우)
+            # 크롭 영역 정보가 있을 경우 좌표 보정 및 적용
             rect = crop_rects.get(page_num) if crop_rects else None
             if rect:
-                page = temp_doc[0]
-                page.set_cropbox(fitz.Rect(rect))
+                # GUI의 상대 좌표를 PDF의 물리적 절대 좌표로 보정 (오프셋 더하기)
+                # 원본 PDF 페이지에 이미 CropBox(여백)가 적용되어 있을 수 있으므로,
+                # GUI의 (0,0) 기준 좌표에 원본 페이지의 실제 CropBox 원점을 더해주어야 한다.
+                # 주의: page.rect의 원점은 항상 0,0으로 정규화되므로 page.cropbox 원점을 사용한다.
+                offset_rect = fitz.Rect(rect) + (page.cropbox.x0, page.cropbox.y0, page.cropbox.x0, page.cropbox.y0)
+                
+                # 가이드 이미지 생성 (원본 크기 기준 렌더링 + 보정된 빨간 테두리)
+                mat = fitz.Matrix(150 / 72, 150 / 72)
+                
+                guide_doc = fitz.open()
+                guide_page = guide_doc.new_page(width=page.rect.width, height=page.rect.height)
+                # 원본 내용을 0,0 위치에 맞게 배치하여 렌더링
+                guide_page.show_pdf_page(guide_page.rect, temp_doc, 0)
+                # 사용자 설정 영역(rect) 그대로 그리기 (guide_page가 이미 시각적 영역 기준이므로)
+                guide_page.draw_rect(fitz.Rect(rect), color=(1, 0, 0), width=2)
+                
+                guide_pix = guide_page.get_pixmap(matrix=mat)
+                guide_pix.save(str(debug_dir / f"page_{page_num:04d}_debug.png"))
+                guide_doc.close()
+
+                # 실제 변환용 PDF에는 보정된 절대 좌표로 크롭 적용
+                page.set_cropbox(offset_rect)
             
-            fd, temp_pdf_path = tempfile.mkstemp(suffix=".pdf")
-            os.close(fd)
-            temp_pdf = Path(temp_pdf_path)
-            temp_doc.save(str(temp_pdf))
+            # 디버깅을 위해 지정된 폴더에 PDF 저장
+            save_path = debug_dir / f"page_{page_num:04d}.pdf"
+            temp_doc.save(str(save_path))
             temp_doc.close()
 
             # 2. marker 실행
             try:
-                log.debug("페이지 %d/%d 변환 중...", page_num, total)
-                rendered = converter(str(temp_pdf))
+                log.debug("페이지 %d/%d 변환 중 (파일: %s)...", page_num, total, save_path.name)
+                rendered = converter(str(save_path))
                 
                 # 마크다운 저장
                 md_text = rendered.markdown.strip()
@@ -117,9 +142,6 @@ def extract_pages_markdown(
             except Exception as e:
                 log.error("페이지 %d 변환 실패: %s", page_num, e)
                 all_pages_md.append(f"> [오류] 페이지 {page_num} 변환에 실패했습니다.")
-            finally:
-                if temp_pdf.exists():
-                    temp_pdf.unlink()
 
     log.info("marker 페이지별 변환 완료: %d 페이지, %d 이미지", len(all_pages_md), len(all_images))
     return all_pages_md, all_images
