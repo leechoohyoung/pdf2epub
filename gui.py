@@ -213,16 +213,16 @@ class App(tk.Tk):
         toolbar = tk.Frame(self)
         toolbar.pack(fill="x", padx=4, pady=2)
         self._btn_save_default = tk.Button(
-            toolbar, text="기본값으로 저장", state="disabled",
+            toolbar, text="이후 페이지에 적용", state="disabled",
             command=self._on_save_as_default,
         )
         self._btn_save_default.pack(side="left", padx=2)
         self._btn_load_default = tk.Button(
-            toolbar, text="기본값 불러오기", state="disabled",
+            toolbar, text="기본 영역 적용", state="disabled",
             command=self._on_load_default,
         )
         self._btn_load_default.pack(side="left", padx=2)
-        self._default_label = tk.Label(toolbar, text="기본값: 미설정",
+        self._default_label = tk.Label(toolbar, text="기본 영역: 미설정",
                                         fg="#666", anchor="w")
         self._default_label.pack(side="left", padx=8)
 
@@ -230,7 +230,7 @@ class App(tk.Tk):
         center_frame = tk.Frame(self)
         center_frame.pack(fill="both", expand=True)
 
-        self._btn_prev = tk.Button(center_frame, text="<<", width=4,
+        self._btn_prev = tk.Button(center_frame, text="이전 페이지",
                                    command=self._prev_page)
         self._btn_prev.pack(side="left", fill="y")
 
@@ -241,7 +241,7 @@ class App(tk.Tk):
         self._canvas.bind("<ButtonRelease-1>", self._on_release)
         self._canvas.bind("<Configure>",       self._on_canvas_resize)
 
-        self._btn_next = tk.Button(center_frame, text=">>", width=4,
+        self._btn_next = tk.Button(center_frame, text="다음 페이지",
                                    command=self._next_page)
         self._btn_next.pack(side="left", fill="y")
 
@@ -294,7 +294,7 @@ class App(tk.Tk):
         self._accordion_header.pack(fill="x")
 
         self._log_toggle_btn = tk.Button(
-            self._accordion_header, text="▶", width=2,
+            self._accordion_header, text="확장", width=4,
             relief="flat", command=self._toggle_log_panel,
         )
         self._log_toggle_btn.pack(side="left", padx=2, pady=1)
@@ -316,6 +316,8 @@ class App(tk.Tk):
             "%(asctime)s [%(levelname)-8s] %(message)s", datefmt="%H:%M:%S",
         ))
         logging.getLogger().addHandler(_gui_handler)
+        # pdf2epub 패키지 내부 로거들이 propagate=False 로 설정될 수 있으므로 명시적 추가
+        logging.getLogger("pdf2epub").addHandler(_gui_handler)
 
         # 3) Convert / Cancel 버튼 — 상태바 바로 위
         btn_frame = tk.Frame(self)
@@ -386,14 +388,14 @@ class App(tk.Tk):
     def _toggle_log_panel(self) -> None:
         if self._log_panel_visible:
             self._log_panel.pack_forget()
-            self._log_toggle_btn.config(text="▶")
+            self._log_toggle_btn.config(text="확장")
             self._log_panel_visible = False
         else:
             self._log_panel.pack(
                 fill="both", expand=True,
                 before=self._accordion_header,
             )
-            self._log_toggle_btn.config(text="▼")
+            self._log_toggle_btn.config(text="축소")
             self._log_panel_visible = True
 
     def _append_log(self, msg: str) -> None:
@@ -483,6 +485,25 @@ class App(tk.Tk):
         if rect is not None:
             log.debug("크롭 오버레이 적용: %s", rect)
             self._draw_crop_overlay(rect)
+        else:
+            # 영역 미지정 시 캔버스 중앙에 시각적 가이드 추가
+            cw = self._canvas.winfo_width()
+            ch = self._canvas.winfo_height()
+            self._canvas.create_text(
+                cw / 2, ch / 2,
+                text="여기를 마우스로 드래그하여 영역을 선택하세요",
+                fill="#ffffff", font=("Arial", 16, "bold"),
+                tags="guide_text"
+            )
+            # 가이드 텍스트 뒤에 배경 박스 (가독성 및 눈에 띄게)
+            self._canvas.tag_lower(
+                self._canvas.create_rectangle(
+                    cw / 2 - 190, ch / 2 - 30, cw / 2 + 190, ch / 2 + 30,
+                    fill="#0055cc", outline="#ffffff", width=2, tags="guide_text"
+                ),
+                "guide_text"
+            )
+
         self._update_crop_label(page_number)
         self._update_toolbar()
         self._set_status("준비")
@@ -540,7 +561,7 @@ class App(tk.Tk):
             text = (f"{override}변환 영역: ({rect[0]:.1f}, {rect[1]:.1f}) — "
                     f"({rect[2]:.1f}, {rect[3]:.1f})  |  페이지 {page_number}/{self._page_count}")
         else:
-            text = f"변환 영역: 미설정  |  페이지 {page_number}/{self._page_count}"
+            text = f"💡 마우스로 드래그하여 변환할 영역을 지정하세요  |  페이지 {page_number}/{self._page_count}"
         self._crop_label.config(text=text)
 
     # ── 핸들 히트테스트 ──────────────────────────────────────────────────────
@@ -572,6 +593,9 @@ class App(tk.Tk):
     def _on_press(self, event: tk.Event) -> None:
         if self._ui_locked:
             return
+        # 가이드 텍스트 즉시 삭제 (드래그 시작 시)
+        self._canvas.delete("guide_text")
+        
         handle = self._hit_handle(event.x, event.y)
         if handle:
             log.debug("핸들 드래그 시작: %s", handle)
@@ -696,11 +720,11 @@ class App(tk.Tk):
         default = self._crop_store.get_default()
         if default:
             self._default_label.config(
-                text=f"기본값: ({default[0]:.1f}, {default[1]:.1f}) — "
+                text=f"기본 영역: ({default[0]:.1f}, {default[1]:.1f}) — "
                      f"({default[2]:.1f}, {default[3]:.1f})"
             )
         else:
-            self._default_label.config(text="기본값: 미설정")
+            self._default_label.config(text="기본 영역: 미설정")
 
     # ── 썸네일 (백그라운드 스레드) ───────────────────────────────────────────
 
@@ -724,16 +748,17 @@ class App(tk.Tk):
                         pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
                         png_list.append(pix.tobytes("png"))
                         log.debug("썸네일 렌더 완료: %d / %d", i + 1, self._page_count)
-                        self.after(0, self._set_status,
-                                   f"썸네일 생성 중... ({i+1}/{self._page_count})",
-                                   i + 1, self._page_count)
+                        if (i + 1) % 10 == 0 or (i + 1) == self._page_count:
+                            self.after(0, self._set_status,
+                                       f"썸네일 생성 중... ({i+1}/{self._page_count})",
+                                       i + 1, self._page_count)
             except Exception as exc:
                 log.exception("썸네일 생성 오류: %s", exc)
                 self.after(0, lambda: self._set_status("썸네일 생성 실패"))
                 self.after(0, lambda: self._lock_ui(False))
                 return
             log.info("썸네일 PNG 데이터 준비 완료, 메인 스레드에 위젯 생성 요청")
-            self.after(0, lambda: self._finish_thumbnails(png_list))
+            self.after(10, lambda: self._finish_thumbnails(png_list))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -741,7 +766,7 @@ class App(tk.Tk):
         log.debug("_finish_thumbnails: 배치 위젯 생성 시작 (총 %d)", len(png_list))
         self._finish_thumbnails_batch(png_list, 0)
 
-    _THUMB_BATCH = 30  # 한 번에 생성할 썸네일 수
+    _THUMB_BATCH = 15  # 한 번에 생성할 썸네일 수를 더 줄여서 부드럽게 유지
 
     def _finish_thumbnails_batch(self, png_list: list[bytes], start: int) -> None:
         end = min(start + self._THUMB_BATCH, len(png_list))
@@ -770,7 +795,8 @@ class App(tk.Tk):
         if end < len(png_list):
             self._set_status(f"썸네일 표시 중... ({end}/{len(png_list)})",
                              value=end, maximum=len(png_list))
-            self.after(0, self._finish_thumbnails_batch, png_list, end)
+            # 메인 루프가 이벤트를 처리하고 화면을 다시 그릴 여유를 준다
+            self.after(20, self._finish_thumbnails_batch, png_list, end)
         else:
             # update_idletasks() 를 여기서 호출하면 N개 위젯 전체 재배치가
             # 한꺼번에 일어나 ArrangePacking O(n²) 폭발이 발생한다.
@@ -986,40 +1012,40 @@ class App(tk.Tk):
         out        = Path(output_path)
         log.debug("변환 crop_rects 수: %d", len(crop_rects))
 
+        def _on_convert_done(success: bool, msg: str) -> None:
+            """메인 스레드에서 실행되어 팝업과 UI 잠금 해제를 순차적으로 안전하게 처리한다."""
+            self._set_status("준비")
+            if success:
+                messagebox.showinfo("완료", msg, parent=self)
+            else:
+                messagebox.showerror("변환 실패", msg, parent=self)
+            self._lock_ui(False)
+
         def worker() -> None:
-            with _TqdmRouter(
-                log_fn=self._append_log,
-                status_fn=lambda s: self.after(
-                    0, lambda _s=s: self._status_label.config(text=_s)
-                ),
-                progress_fn=lambda p: self.after(
-                    0, lambda _p=p: self._set_progress_direct(_p)
-                ),
-            ):
-                try:
-                    if use_text_mode:
-                        self.after(0, lambda: self._set_status("텍스트 추출 중...", indeterminate=True))
-                        module.convert_pdf_to_epub_text_mode(
-                            input_pdf=self._pdf_path,
-                            output_epub=out,
-                            crop_rects=crop_rects if crop_rects else None,
+            try:
+                if use_text_mode:
+                    module.convert_pdf_to_epub_text_mode(
+                        input_pdf=self._pdf_path,
+                        output_epub=out,
+                        crop_rects=crop_rects if crop_rects else None,
+                        logger=log,
+                        progress_callback=lambda cur, tot: self.after(
+                            0, lambda: self._set_status(f"페이지 변환 중... ({cur}/{tot})", cur, tot)
                         )
-                    else:
-                        module.convert_pdf_to_epub(
-                            input_pdf=self._pdf_path,
-                            output_epub=out,
-                            crop_rects=crop_rects,
-                        )
-                    log.info("변환 완료: %s", out)
-                    self.after(0, lambda: messagebox.showinfo(
-                        "완료", f"변환이 완료됐습니다:\n{out}"))
-                except Exception as exc:
-                    msg = str(exc)
-                    log.exception("변환 실패: %s", msg)
-                    self.after(0, lambda m=msg: messagebox.showerror("변환 실패", m))
-                finally:
-                    self.after(0, lambda: self._set_status("준비"))
-                    self.after(0, lambda: self._lock_ui(False))
+                    )
+                else:
+                    module.convert_pdf_to_epub(
+                        input_pdf=self._pdf_path,
+                        output_epub=out,
+                        crop_rects=crop_rects,
+                        logger=log,
+                    )
+                log.info("변환 완료: %s", out)
+                self.after(0, _on_convert_done, True, f"변환이 완료됐습니다:\n{out}")
+            except Exception as exc:
+                msg = str(exc)
+                log.exception("변환 실패: %s", msg)
+                self.after(0, _on_convert_done, False, msg)
 
         threading.Thread(target=worker, daemon=True).start()
 
